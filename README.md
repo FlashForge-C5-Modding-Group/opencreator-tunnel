@@ -116,7 +116,8 @@ First run:
    tool is pulled out, the X/Y endstops are probed, and the tool is docked
    again.
 2. Nozzle offsets: remove the build plate, `G28`, `CALIBRATE_TOOL_OFFSETS`.
-   The bed is heated to 65 °C and left for 60 s, then each docked tool is
+   It first checks that the plate is off (stock's probe comparison), then
+   heats the bed to 65 °C and waits 60 s; each docked tool is then
    picked up, held at 120 °C and centred on the bed's eddy-current station.
    Defaults are in `_TC_SETTINGS` (`c5_toolchanger.cfg`); `BED=`, `SOAK=`,
    `NOZZLE=` override them per run, and `CLEAN=1` adds stock's nozzle clean
