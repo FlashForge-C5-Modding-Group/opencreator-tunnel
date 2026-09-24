@@ -105,8 +105,9 @@ ports and Mainsail reports `Ready`.
 Tool changes follow the stock grab and release sequences. `T<n>` lifts Z by
 1 mm, puts the held tool back in its dock, picks up tool `n`, applies its
 offsets, activates `extruder<n>` (so `M104`/`M109` without `T` heat the
-active tool) and returns to the previous position. A failed grab or release
-stops with an error; there are no automatic retries.
+active tool) and stays by the docks, 1 mm above the old height; like stock,
+the slicer's next moves take the new tool back to the print. A failed grab
+or release stops with an error; there are no automatic retries.
 
 First run:
 
