@@ -116,8 +116,11 @@ First run:
    tool is pulled out, the X/Y endstops are probed, and the tool is docked
    again.
 2. Nozzle offsets: remove the build plate, `G28`, `CALIBRATE_TOOL_OFFSETS`.
-   Each docked tool is picked up, heated to 220 °C, purged, wiped, cooled to
-   120 °C and centred on the bed's eddy-current station. Refit the plate.
+   The bed is heated to 65 °C and left for 60 s, then each docked tool is
+   picked up, held at 120 °C and centred on the bed's eddy-current station.
+   Defaults are in `_TC_SETTINGS` (`c5_toolchanger.cfg`); `BED=`, `SOAK=`,
+   `NOZZLE=` override them per run, and `CLEAN=1` adds stock's nozzle clean
+   (220 °C, purge, wipe, cool to 120 °C). Refit the plate.
 3. `G28`, `T0`, then `PROBE_CALIBRATE` and `SAVE_CONFIG`. Tool offsets are
    relative to T0, so this sets the Z height of every tool. Per-tool Z fine
    tune: `SAVE_VARIABLE VARIABLE=t1_z_fine VALUE=0.02` (mm, T1-T3).
