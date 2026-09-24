@@ -25,7 +25,7 @@ PORTS = [  # name, uart, baud, needs_wake, wake parity order, gadget interface
     ("mainboardgd", "/dev/ttyS2", 230400, False, (), "1.0"),
     ("heaterboard", "/dev/ttyS4", 230400, True, ("N", "E"), "1.1"),
     ("eboard", "/dev/ttyS5", 460800, True, ("E", "N"), "1.2"),
-    ("levelboard", "/dev/ttyS7", 230400, True, ("E", "N"), "1.3"),
+    ("levelboard", "/dev/ttyS7", 230400, True, ("N", "E"), "1.3"),
 ]
 # Built-in one-port bulk usb-serial drivers that accept a dynamic id
 USB_SERIAL_DRIVERS = ("flashloader", "vivopay", "zio", "carelink", "funsoft")
