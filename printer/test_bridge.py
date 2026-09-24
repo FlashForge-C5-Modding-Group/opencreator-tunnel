@@ -92,7 +92,7 @@ def test_wake_succeeds_on_first_parity(pty_port):
     t = threading.Thread(target=fake_boot_stage, args=(master, stop))
     t.start()
     try:
-        assert bridge.wake(slave, 230400, ("E", "N")) == (True, "E")
+        assert bridge.wake(slave, 230400, ("E", "N")) == (True, "parity E")
     finally:
         stop.set()
         t.join()
@@ -123,12 +123,42 @@ def test_wake_banner_without_ack_tries_every_parity(pty_port, monkeypatch):
     t = threading.Thread(target=banner_forever)
     t.start()
     try:
-        assert bridge.wake(slave, 460800, ("N", "E")) == (False, "no ack")
+        ok, detail = bridge.wake(slave, 460800, ("N", "E"))
     finally:
         stop.set()
         t.join()
-    assert parities == ["N", "E", None]
+    assert not ok and detail.startswith("no ack (after A N: ")
+    # each banner-without-ack is checked at the Klipper baud
+    assert parities == ["N", None, "E", None, None]
     assert_klipper_line(slave, 460800)
+
+
+def test_wake_accepts_release_with_lost_ack(pty_port, monkeypatch):
+    monkeypatch.setattr(bridge, "WAKE_ACK_TIMEOUT", 0.05)
+    master, slave, parities = pty_port
+    stop = threading.Event()
+
+    def release_without_ack():
+        # Boot stage that jumps to the application on 'A' but whose 0x06
+        # never arrives; the application then answers identify.
+        while not stop.is_set():
+            os.write(master, b"Ready.\r\n")
+            if b"A" in bridge.read_ready(master, 0.1):
+                break
+        det = bridge.FrameDetector()
+        while not stop.is_set():
+            for frame in det.feed(bridge.read_ready(master, 0.05)):
+                os.write(master, mcu_block())
+    t = threading.Thread(target=release_without_ack)
+    t.start()
+    try:
+        assert bridge.wake(slave, 230400, ("E", "N")) == (
+            True, "parity E, ack lost")
+    finally:
+        stop.set()
+        t.join()
+    assert parities == ["E", None, None]
+    assert_klipper_line(slave, 230400)
 
 
 # -- (c) reactive wake rule ------------------------------------------------

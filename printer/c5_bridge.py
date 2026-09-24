@@ -269,7 +269,8 @@ def write_some(fd, pending):
 
 def probe_alive(fd, timeout=PROBE_TIMEOUT):
     termios.tcflush(fd, termios.TCIFLUSH)
-    write_all(fd, IDENTIFY_BLOCK)
+    # Leading sync ends any garbage-discard in the MCU parser.
+    write_all(fd, bytes([MESSAGE_SYNC]) + IDENTIFY_BLOCK)
     detector = FrameDetector()
     deadline = time.monotonic() + timeout
     while True:
@@ -281,9 +282,10 @@ def probe_alive(fd, timeout=PROBE_TIMEOUT):
 
 
 def _wake_attempt(fd):
-    """Return (got_bytes, saw_banner, acked) for the current line setup."""
+    """Return (got_bytes, saw_banner, acked, rx_after_a) for this line setup."""
     got_bytes = saw_banner = False
     tail = bytearray()
+    after_a = bytearray()
     deadline = time.monotonic() + WAKE_BANNER_TIMEOUT
     while time.monotonic() < deadline:
         data = read_ready(fd, deadline - time.monotonic())
@@ -299,31 +301,42 @@ def _wake_attempt(fd):
             write_all(fd, b"A")
             ack_deadline = time.monotonic() + WAKE_ACK_TIMEOUT
             while time.monotonic() < ack_deadline:
-                if 0x06 in read_ready(fd, ack_deadline - time.monotonic()):
-                    return got_bytes, saw_banner, True
-        return got_bytes, saw_banner, False
-    return got_bytes, saw_banner, False
+                data = read_ready(fd, ack_deadline - time.monotonic())
+                after_a += data[:32 - len(after_a)]
+                if 0x06 in data:
+                    return got_bytes, saw_banner, True, bytes(after_a)
+        return got_bytes, saw_banner, False, bytes(after_a)
+    return got_bytes, saw_banner, False, bytes(after_a)
 
 
 def wake(fd, baud, parity_order):
     """Release a board from its resident boot stage.
 
-    Returns (True, parity) on ACK, else (False, "no banner"|"no ack").
+    Returns (True, detail) once the board acknowledged or, with the ack
+    lost, answers an identify at its Klipper baud; else (False, detail).
     The fd is always left at baud 8N1 with flushed queues.
     """
     saw_banner = False
+    rx = []
     try:
         for parity in parity_order:
             configure_tty(fd, 115200, parity)
-            got_bytes, banner, acked = _wake_attempt(fd)
+            got_bytes, banner, acked, after_a = _wake_attempt(fd)
             if acked:
-                return True, parity
-            saw_banner = saw_banner or banner
+                return True, "parity %s" % (parity,)
             if not got_bytes:
                 break
+            saw_banner = saw_banner or banner
+            if banner:
+                configure_tty(fd, baud)
+                if probe_alive(fd):
+                    return True, "parity %s, ack lost" % (parity,)
+                rx.append("%s: %s" % (parity, after_a.hex() or "-"))
     finally:
         configure_tty(fd, baud)
-    return False, "no ack" if saw_banner else "no banner"
+    if not saw_banner:
+        return False, "no banner"
+    return False, "no ack (after A %s)" % ("; ".join(rx),)
 
 ######################################################################
 # Gadget link discovery
@@ -461,7 +474,7 @@ class PortBridge(threading.Thread):
     def run_wake(self):
         ok, detail = wake(self.uart, self.baud, self.parity_order)
         if ok:
-            self.log("wake ok (parity %s)" % (detail,))
+            self.log("wake ok (%s)" % (detail,))
         else:
             self.log("wake failed: %s" % (detail,))
 
