@@ -81,6 +81,28 @@ def log(msg):
             except (OSError, ValueError):
                 pass
 
+
+_kernel_logged = [0.0]
+
+
+def log_kernel_usb(lines=20):
+    """Record recent kernel USB messages once per link-loss event; the
+    printer's kernel ring buffer is lost on power-cycle."""
+    with _log_lock:
+        now = time.monotonic()
+        if now - _kernel_logged[0] < 5.0:
+            return
+        _kernel_logged[0] = now
+    try:
+        out = subprocess.run(["dmesg"], stdout=subprocess.PIPE,
+                             stderr=subprocess.DEVNULL, timeout=5).stdout
+    except (OSError, subprocess.SubprocessError) as e:
+        log("kernel: dmesg failed: %s" % (e,))
+        return
+    keep = [line for line in out.decode("utf-8", "replace").splitlines()
+            if "RTW:" not in line][-lines:]
+    log("kernel:\n" + "\n".join(keep))
+
 ######################################################################
 # Klipper block framing (klippy/msgproto.py)
 ######################################################################
@@ -501,6 +523,7 @@ class PortBridge(threading.Thread):
             self._forward(link)
         except LinkDown:
             self.log("link down")
+            log_kernel_usb()
         finally:
             os.close(link)
 
