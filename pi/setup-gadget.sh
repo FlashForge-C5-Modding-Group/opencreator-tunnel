@@ -12,10 +12,14 @@ ensure_line() {  # ensure_line FILE LINE
 if grep -qa "Raspberry Pi" /proc/device-tree/model 2>/dev/null; then
     CONFIG=/boot/firmware/config.txt
     [ -f "$CONFIG" ] || CONFIG=/boot/config.txt
-    if grep -q '^dtoverlay=dwc2' "$CONFIG"; then
-        sed -i 's/^dtoverlay=dwc2.*/dtoverlay=dwc2,dr_mode=peripheral/' "$CONFIG"
-    else
-        printf '\n[all]\ndtoverlay=dwc2,dr_mode=peripheral\n' >> "$CONFIG"
+    OVERLAY=dtoverlay=dwc2,dr_mode=peripheral
+    # Only count the overlay if it applies to every board: before the first
+    # section filter or under [all]. Leave other sections (e.g. the stock
+    # "[cm5] dtoverlay=dwc2,dr_mode=host") untouched.
+    if ! awk -v want="$OVERLAY" '/^\[/ { s = $0 }
+            $0 == want && (s == "" || s == "[all]") { found = 1 }
+            END { exit !found }' "$CONFIG"; then
+        printf '\n[all]\n%s\n' "$OVERLAY" >> "$CONFIG"
     fi
     ensure_line /etc/modules dwc2
     echo "configured dwc2 peripheral mode in $CONFIG"
