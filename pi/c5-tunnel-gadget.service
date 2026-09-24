@@ -1,0 +1,12 @@
+[Unit]
+Description=Creator 5 MCU tunnel USB gadget (four CDC-ACM ports)
+Before=klipper.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/c5-tunnel-gadget.sh
+ExecStop=/usr/local/sbin/c5-tunnel-gadget.sh stop
+
+[Install]
+WantedBy=multi-user.target
