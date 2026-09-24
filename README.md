@@ -36,10 +36,6 @@ phases.
 
 ## Printer
 
-The mainBoardGD firmware must be a klipper-c5 build that boots with the
-stock motor configuration (16 microsteps, stock currents); upstream Klipper
-does not send the stock `[mclib]` settings.
-
 Install (printer reachable over SSH as root):
 
 ```sh
@@ -79,7 +75,10 @@ ssh root@<printer-ip> reboot
    devices.
 3. Install Klipper, Moonraker and Mainsail with
    [KIAUH](https://github.com/dw-0/kiauh). For Klipper, use the custom
-   repository `https://github.com/wondercrash/klipper-c5`, branch `c5`.
+   repository `https://github.com/wondercrash/klipper-c5`, branch `c5`. It
+   provides the `[mclib]` module that configures the mainBoardGD motors
+   (currents, microstepping, resonance damping), which upstream Klipper
+   lacks.
    Moonraker's update manager may report the fork as unofficial; that is
    cosmetic.
 4. Copy `pi/config/*.cfg` to `~/printer_data/config/` and restart Klipper.
