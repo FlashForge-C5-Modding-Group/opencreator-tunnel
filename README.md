@@ -20,9 +20,8 @@ SBC (Klipper, Moonraker, Mainsail)
                                                      ttyS7  levelBoard   230400
 ```
 
-Status: phase 1 (tunnel and upstream configuration). Tool changes, extruder
-offset and vibration calibrations, and touchscreen streaming are later
-phases.
+Status: phase 2 (tool changes and tool calibrations). Vibration
+calibrations and touchscreen streaming are later phases.
 
 ## Hardware
 
@@ -77,11 +76,12 @@ ssh root@<printer-ip> reboot
    [KIAUH](https://github.com/dw-0/kiauh). For Klipper, use the custom
    repository `https://github.com/wondercrash/klipper-c5`, branch `c5`. It
    provides the `[mclib]` module that configures the mainBoardGD motors
-   (currents, microstepping, resonance damping), which upstream Klipper
-   lacks.
+   (currents, microstepping, resonance damping) and `[c5_endstop_probe]`,
+   used by the tool calibrations; upstream Klipper lacks both.
    Moonraker's update manager may report the fork as unofficial; that is
    cosmetic.
-4. Copy `pi/config/*.cfg` to `~/printer_data/config/` and restart Klipper.
+4. Copy `pi/config/*.cfg` to `~/printer_data/config/` (keep the
+   `mainsail.cfg` that KIAUH installed) and restart Klipper.
 
 `setup-gadget.sh` installs `c5-tunnel-gadget.service` (creates the gadget
 at boot) and a `klipper.service` drop-in so Klipper starts after it.
@@ -93,21 +93,34 @@ ports and Mainsail reports `Ready`.
 - `c5_hardware.cfg`: MCUs, steppers, probe, heaters, fans, sensors, all
   transcribed from the stock 1.9.9 configuration. Sections that need
   FlashForge-only Klipper modules are left out.
-- `c5_macros.cfg`: `M106`/`M107`/`M900`, gear-stepper building blocks, and
+- `c5_macros.cfg`: `M106`/`M107`/`M900`, gear-stepper building blocks,
   `M104`/`M109`/`SET_HEATER_TEMPERATURE` wrappers that switch on the 24 V
-  heater rail (`DC24V_CTL`) as stock Klipper does. The idle timeout switches
-  it off again.
-- `printer.cfg`: includes the two files above and holds your calibrated
-  values; `SAVE_CONFIG` writes here.
+  heater rail (`DC24V_CTL`) as stock Klipper does (the idle timeout switches
+  it off again), and the Mainsail park position, kept clear of the docks.
+- `c5_toolchanger.cfg`: `T0`-`T3`, `TOOL_DROP` and the stock tool
+  calibrations. Results are stored in `c5_variables.cfg`.
+- `printer.cfg`: includes `mainsail.cfg` and the files above and holds your
+  calibrated values; `SAVE_CONFIG` writes here.
 
-The four extruders share one extruder stepper; select the docked tool with
-`ACTIVATE_EXTRUDER EXTRUDER=extruderN`. Tool-change macros are not part of
-phase 1.
+Tool changes follow the stock grab and release sequences. `T<n>` lifts Z by
+1 mm, puts the held tool back in its dock, picks up tool `n`, applies its
+offsets, activates `extruder<n>` (so `M104`/`M109` without `T` heat the
+active tool) and returns to the previous position. A failed grab or release
+stops with an error; there are no automatic retries.
 
 First run:
 
-1. `PROBE_CALIBRATE`, then `SAVE_CONFIG`.
-2. `BED_MESH_CALIBRATE`, then `SAVE_CONFIG`.
+1. Dock positions, for each tool `n` (0-3): `M84`, push the carriage onto
+   the docked tool until it latches, then `CALIBRATE_TOOL_DOCK TOOL=n`. The
+   tool is pulled out, the X/Y endstops are probed, and the tool is docked
+   again.
+2. Nozzle offsets: remove the build plate, `G28`, `CALIBRATE_TOOL_OFFSETS`.
+   Each docked tool is picked up, heated to 220 °C, purged, wiped, cooled to
+   120 °C and centred on the bed's eddy-current station. Refit the plate.
+3. `G28`, `T0`, then `PROBE_CALIBRATE` and `SAVE_CONFIG`. Tool offsets are
+   relative to T0, so this sets the Z height of every tool. Per-tool Z fine
+   tune: `SAVE_VARIABLE VARIABLE=t1_z_fine VALUE=0.02` (mm, T1-T3).
+4. `BED_MESH_CALIBRATE`, then `SAVE_CONFIG`.
 
 ## Camera
 
