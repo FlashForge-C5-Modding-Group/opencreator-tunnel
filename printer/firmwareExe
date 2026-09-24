@@ -1,0 +1,25 @@
+#!/bin/sh
+# c5-tunnel launcher. Installed over /usr/prog/PROGRAM/software/firmwareExe;
+# the stock binary is kept as /usr/prog/c5-tunnel/firmwareExe.stock.
+# app_startup.sh starts this file and restores the stock binary if no
+# process named firmwareExe exists 5 s later, so this script never exits.
+export LD_LIBRARY_PATH=/usr/prog/Python-3.8.2/lib:/usr/prog/openssl-1.0.2d/lib:/usr/prog/libffi-3.4.4/lib:$LD_LIBRARY_PATH
+
+# Mirrors stock klipper/start.sh (SoC coprocessor firmware).
+cmd_mcu write_firmware /usr/prog/libmcu-bare.bin
+cmd_mcu bootup
+sleep 2
+
+# Stock firmwareExe joins the Wi-Fi networks saved from the touchscreen;
+# without it nothing associates wlan0 (dhcpcd from init only leases).
+WPA_CONF=/usr/prog/wifi/wpa_supplicant.conf
+if [ -e /sys/class/net/wlan0 ] && grep -q 'network=' "$WPA_CONF" 2>/dev/null \
+        && ! pidof wpa_supplicant >/dev/null 2>&1; then
+    wpa_supplicant -Dnl80211 -iwlan0 -c"$WPA_CONF" -B
+    udhcpc -i wlan0 -b >/dev/null 2>&1
+fi
+
+while true; do
+    /usr/prog/Python-3.8.2/bin/python3 /usr/prog/c5-tunnel/c5_bridge.py
+    sleep 3
+done
