@@ -6,7 +6,8 @@ DIR=/usr/prog/c5-tunnel
 SOFTWARE=/usr/prog/PROGRAM/software
 TARGET=$SOFTWARE/firmwareExe
 PYTHON=/usr/prog/Python-3.8.2/bin/python3
-export LD_LIBRARY_PATH=/usr/prog/Python-3.8.2/lib:$LD_LIBRARY_PATH
+# Same library path as the launcher (and stock klipper/start.sh).
+export LD_LIBRARY_PATH=/usr/prog/Python-3.8.2/lib:/usr/prog/openssl-1.0.2d/lib:/usr/prog/libffi-3.4.4/lib:$LD_LIBRARY_PATH
 
 die() { echo "install: $*" >&2; exit 1; }
 is_elf() { [ "$(dd if="$1" bs=1 skip=1 count=3 2>/dev/null)" = "ELF" ]; }
