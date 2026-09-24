@@ -28,6 +28,15 @@ echo c5-tunnel > strings/0x409/manufacturer
 echo "Creator 5 MCU tunnel" > strings/0x409/product
 mkdir -p configs/c.1/strings/0x409
 echo "C5 tunnel" > configs/c.1/strings/0x409/configuration
+# Drop functions left by an older layout (e.g. acm.*): they would exceed
+# the controller's endpoints and make the bind fail.
+for f in configs/c.1/*.*; do
+    [ -L "$f" ] || continue
+    case "${f##*/}" in
+        gser.usb[0-3]) ;;
+        *) rm "$f"; rmdir "functions/${f##*/}" 2>/dev/null || true ;;
+    esac
+done
 # Create and link in order so usb<n> gets ttyGS<n> and interface n.
 for i in 0 1 2 3; do
     mkdir -p functions/gser.usb$i
