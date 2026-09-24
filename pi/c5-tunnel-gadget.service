@@ -1,5 +1,5 @@
 [Unit]
-Description=Creator 5 MCU tunnel USB gadget (four CDC-ACM ports)
+Description=Creator 5 MCU tunnel USB gadget (four serial ports)
 Before=klipper.service
 
 [Service]

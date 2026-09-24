@@ -12,12 +12,12 @@ runs Klipper from the same repository (branch `c5`).
 
 ```
 SBC (Klipper, Moonraker, Mainsail)
-  /dev/ttyGS0..3  --USB gadget, 4x CDC-ACM-->  printer /dev/ttyACM*
-                                               c5_bridge.py
-                                                 ttyS2  mainBoardGD  230400
-                                                 ttyS4  heaterBoard  230400
-                                                 ttyS5  eBoard       460800
-                                                 ttyS7  levelBoard   230400
+  /dev/ttyGS0..3  --USB gadget, 4x gser serial-->  printer /dev/ttyUSB*
+                                                   c5_bridge.py
+                                                     ttyS2  mainBoardGD  230400
+                                                     ttyS4  heaterBoard  230400
+                                                     ttyS5  eBoard       460800
+                                                     ttyS7  levelBoard   230400
 ```
 
 Status: phase 1 (tunnel and upstream configuration). Tool changes, extruder
@@ -53,7 +53,7 @@ forever. After reboot the touchscreen stays blank.
 - Bridge log: `/usr/data/logs/c5-tunnel.log` (previous boot:
   `c5-tunnel.log.1`). Each port logs `alive` or `wake ok (parity E|N)`,
   then `waiting for gadget` until the SBC is connected, then
-  `link up /dev/ttyACMn (1.x)`.
+  `link up /dev/ttyUSBn (1.x)`.
 - Wi-Fi: the launcher joins the networks saved from the stock touchscreen
   (`/usr/prog/wifi/wpa_supplicant.conf`), as stock `firmwareExe` did. To
   change networks, return to stock or edit that file.

@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 # Creator 5 MCU tunnel: forward the printer's four MCU UARTs to an SBC over
-# USB CDC-ACM (the SBC runs a four-port ACM gadget; this side sees ttyACM*).
+# USB. The SBC runs a four-port "gser" serial gadget (two endpoints per port,
+# so four ports fit the Pi's dwc2 controller); this side binds it to a
+# built-in usb-serial driver and sees one ttyUSB per gadget interface.
 #
 # Runs on the printer SoC with its bundled Python 3.8, stdlib only.
 #
 # This file may be distributed under the terms of the GNU GPLv3 license.
 import errno
+import re
 import os
 import select
 import signal
@@ -20,21 +23,24 @@ import traceback
 GADGET_VID, GADGET_PID = "1d6b", "0104"
 PORTS = [  # name, uart, baud, needs_wake, wake parity order, gadget interface
     ("mainboardgd", "/dev/ttyS2", 230400, False, (), "1.0"),
-    ("heaterboard", "/dev/ttyS4", 230400, True, ("N", "E"), "1.2"),
-    ("eboard", "/dev/ttyS5", 460800, True, ("E", "N"), "1.4"),
-    ("levelboard", "/dev/ttyS7", 230400, True, ("E", "N"), "1.6"),
+    ("heaterboard", "/dev/ttyS4", 230400, True, ("N", "E"), "1.1"),
+    ("eboard", "/dev/ttyS5", 460800, True, ("E", "N"), "1.2"),
+    ("levelboard", "/dev/ttyS7", 230400, True, ("E", "N"), "1.3"),
 ]
+# Built-in one-port bulk usb-serial drivers that accept a dynamic id
+USB_SERIAL_DRIVERS = ("flashloader", "vivopay", "zio", "carelink", "funsoft")
 WAKE_BANNER_TIMEOUT = 4.0   # s per parity waiting for b"Ready"
 WAKE_ACK_TIMEOUT = 0.3      # s waiting for 0x06 after each b"A"
 WAKE_ACK_TRIES = 3
 IDENTIFY_UNANSWERED = 0.4   # s after a host identify with no valid MCU frame
 WAKE_RETRY_MIN = 5.0        # s between reactive wake attempts per port
 PROBE_TIMEOUT = 0.3         # s waiting for any frame after a probe identify
-LINK_POLL = 0.5             # s between ttyACM scans
+LINK_POLL = 0.5             # s between gadget tty scans
 UART_RETRY = 5.0            # s between attempts to open a missing UART
 MAX_PENDING = 65536         # bytes buffered per direction before backpressure
 LOG = "/usr/data/logs/c5-tunnel.log"
 SYSFS_TTY = "/sys/class/tty"
+SYSFS_USB_SERIAL = "/sys/bus/usb-serial/drivers"
 DEV_DIR = "/dev"
 
 CAMERA_DIR = "/usr/prog/mjpg-streamer"
@@ -329,36 +335,63 @@ def _read_text(path):
         return f.read().strip()
 
 
-def find_acm(iface, sysfs=SYSFS_TTY, devdir=DEV_DIR):
-    """Return the /dev path of the gadget ttyACM on interface iface."""
+INTERFACE_DIR = re.compile(r"^\d+-[\d.]+:(\d+\.\d+)$")
+
+
+def bind_usb_serial(sysfs=SYSFS_USB_SERIAL):
+    """Give the gadget id to a usb-serial driver; return the driver name.
+
+    gser interfaces are vendor-specific, so no driver claims them until
+    one is given their id; usb-serial then attaches every interface.
+    """
+    gadget_id = "%s %s" % (GADGET_VID, GADGET_PID)
+    for name in USB_SERIAL_DRIVERS:
+        new_id = os.path.join(sysfs, name, "new_id")
+        if not os.path.exists(new_id):
+            continue
+        try:
+            with open(new_id) as f:
+                if any(l.split()[:2] == gadget_id.split() for l in f):
+                    return name
+            with open(new_id, "w") as f:
+                f.write(gadget_id + " ff\n")
+            return name
+        except OSError as e:
+            log("usb-serial: %s new_id failed: %s" % (name, e))
+    return None
+
+
+def find_link(iface, sysfs=SYSFS_TTY, devdir=DEV_DIR):
+    """Return the /dev path of the gadget ttyUSB on interface iface."""
     try:
-        names = sorted(n for n in os.listdir(sysfs) if n.startswith("ttyACM"))
+        names = sorted(n for n in os.listdir(sysfs) if n.startswith("ttyUSB"))
     except OSError:
         return None
     for name in names:
         try:
-            intf = os.path.realpath(os.path.join(sysfs, name, "device"))
-            base = os.path.basename(intf)
-            if ":" not in base or base.split(":", 1)[1] != iface:
-                continue
-            parent = os.path.dirname(intf)
-            while parent not in ("/", ""):
-                if os.path.exists(os.path.join(parent, "idVendor")):
+            # device -> .../<bus>-<port>:<cfg>.<iface>/ttyUSBn
+            path = os.path.realpath(os.path.join(sysfs, name, "device"))
+            while path not in ("/", ""):
+                match = INTERFACE_DIR.match(os.path.basename(path))
+                if match:
                     break
-                parent = os.path.dirname(parent)
+                path = os.path.dirname(path)
             else:
                 continue
-            if (_read_text(os.path.join(parent, "idVendor")) != GADGET_VID
-                    or _read_text(os.path.join(parent, "idProduct"))
+            if match.group(1) != iface:
+                continue
+            usbdev = os.path.dirname(path)
+            if (_read_text(os.path.join(usbdev, "idVendor")) != GADGET_VID
+                    or _read_text(os.path.join(usbdev, "idProduct"))
                     != GADGET_PID):
                 continue
-            path = os.path.join(devdir, name)
-            if not os.path.exists(path):
+            node = os.path.join(devdir, name)
+            if not os.path.exists(node):
                 major, minor = _read_text(
                     os.path.join(sysfs, name, "dev")).split(":")
-                os.mknod(path, stat.S_IFCHR | 0o600,
+                os.mknod(node, stat.S_IFCHR | 0o600,
                          os.makedev(int(major), int(minor)))
-            return path
+            return node
         except (OSError, ValueError):
             continue
     return None
@@ -399,9 +432,9 @@ class PortBridge(threading.Thread):
                 if not self.probed:
                     self.initial_probe()
                     self.probed = True
-                acm = self.wait_link()
-                if acm is not None:
-                    self.forward(acm)
+                link = self.wait_link()
+                if link is not None:
+                    self.forward(link)
             except Exception:
                 self.log("error\n" + traceback.format_exc().rstrip())
                 self.stop.wait(2.0)
@@ -433,10 +466,10 @@ class PortBridge(threading.Thread):
             self.log("wake failed: %s" % (detail,))
 
     def wait_link(self):
-        """Poll for the gadget ttyACM, discarding UART bytes meanwhile."""
+        """Poll for the gadget tty, discarding UART bytes meanwhile."""
         self.log("waiting for gadget")
         while not self.stop.is_set():
-            path = find_acm(self.iface)
+            path = find_link(self.iface)
             if path is not None:
                 try:
                     fd = open_tty(path, 115200)
@@ -450,17 +483,17 @@ class PortBridge(threading.Thread):
                 read_ready(self.uart, deadline - time.monotonic())
         return None
 
-    def forward(self, acm):
+    def forward(self, link):
         try:
-            self._forward(acm)
+            self._forward(link)
         except LinkDown:
             self.log("link down")
         finally:
-            os.close(acm)
+            os.close(link)
 
-    def _read_acm(self, acm):
+    def _read_link(self, link):
         try:
-            data = os.read(acm, 4096)
+            data = os.read(link, 4096)
         except BlockingIOError:
             return None
         except OSError as e:
@@ -469,32 +502,32 @@ class PortBridge(threading.Thread):
             raise LinkDown("eof")
         return data
 
-    def _drain_acm(self, acm):
-        while read_ready(acm, 0.0):
+    def _drain_link(self, link):
+        while read_ready(link, 0.0):
             pass
 
-    def _forward(self, acm):
+    def _forward(self, link):
         uart = self.uart
         to_uart = bytearray()
-        to_acm = bytearray()
+        to_link = bytearray()
         host_frames = FrameDetector()
         mcu_frames = FrameDetector()
         monitor = self.monitor
         while not self.stop.is_set():
             rlist = []
-            if len(to_acm) < MAX_PENDING:
+            if len(to_link) < MAX_PENDING:
                 rlist.append(uart)
             if len(to_uart) < MAX_PENDING:
-                rlist.append(acm)
+                rlist.append(link)
             wlist = []
             if to_uart:
                 wlist.append(uart)
-            if to_acm:
-                wlist.append(acm)
+            if to_link:
+                wlist.append(link)
             r, w, _ = select.select(rlist, wlist, [], 0.1)
             now = time.monotonic()
-            if acm in r:
-                data = self._read_acm(acm)
+            if link in r:
+                data = self._read_link(link)
                 if data:
                     to_uart += data
                     for frame in host_frames.feed(data):
@@ -505,14 +538,14 @@ class PortBridge(threading.Thread):
                 except BlockingIOError:
                     data = b""
                 if data:
-                    to_acm += data
+                    to_link += data
                     if mcu_frames.feed(data):
                         monitor.mcu_frame(now)
             if to_uart:
                 write_some(uart, to_uart)
-            if to_acm:
+            if to_link:
                 try:
-                    write_some(acm, to_acm)
+                    write_some(link, to_link)
                 except OSError as e:
                     raise LinkDown(e)
             if self.needs_wake and monitor.should_wake(now):
@@ -520,7 +553,7 @@ class PortBridge(threading.Thread):
                 monitor.wake_started(now)
                 del to_uart[:]
                 self.run_wake()
-                self._drain_acm(acm)
+                self._drain_link(link)
                 host_frames.reset()
                 mcu_frames.reset()
 
@@ -592,6 +625,11 @@ def main():
     log("c5-tunnel bridge starting (pid %d)" % (os.getpid(),))
     # Threads created after this call inherit the scheduling policy.
     set_priority()
+    driver = bind_usb_serial()
+    if driver is None:
+        log("usb-serial: no driver accepted the gadget id")
+    else:
+        log("usb-serial: gadget bound to %s" % (driver,))
     stop = threading.Event()
 
     def on_signal(signum, frame):

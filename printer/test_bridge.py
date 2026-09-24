@@ -168,34 +168,46 @@ def test_reactive_wake_ignores_non_identify_host_frames():
 
 # -- gadget discovery via sysfs layout -------------------------------------
 
-def make_acm(root, name, intf, vid="1d6b", pid="0104"):
+def make_usb_serial(root, name, intf, vid="1d6b", pid="0104"):
+    """Mimic /sys/class/tty/ttyUSBn -> .../1-1/1-1:1.x/ttyUSBn."""
     dev = root / "devices" / "usb1" / "1-1"
-    (dev / intf).mkdir(parents=True, exist_ok=True)
+    port = dev / intf / name
+    port.mkdir(parents=True)
     (dev / "idVendor").write_text(vid + "\n")
     (dev / "idProduct").write_text(pid + "\n")
     tty = root / "class" / name
     tty.mkdir(parents=True)
-    (tty / "device").symlink_to(dev / intf)
-    (tty / "dev").write_text("166:0\n")
+    (tty / "device").symlink_to(port)
+    (tty / "dev").write_text("188:0\n")
+    (root / "dev").mkdir(exist_ok=True)
+    (root / "dev" / name).touch()
 
 
-def test_find_acm_matches_gadget_interface(tmp_path):
-    make_acm(tmp_path, "ttyACM0", "1-1:1.0")
-    make_acm(tmp_path, "ttyACM1", "1-1:1.2")
-    devdir = tmp_path / "dev"
-    devdir.mkdir()
-    (devdir / "ttyACM0").touch()
-    (devdir / "ttyACM1").touch()
-    sysfs = str(tmp_path / "class")
-    assert bridge.find_acm("1.2", sysfs, str(devdir)) == str(
-        devdir / "ttyACM1")
-    assert bridge.find_acm("1.6", sysfs, str(devdir)) is None
+def test_find_link_matches_gadget_interface(tmp_path):
+    make_usb_serial(tmp_path, "ttyUSB0", "1-1:1.0")
+    make_usb_serial(tmp_path, "ttyUSB1", "1-1:1.1")
+    sysfs, devdir = str(tmp_path / "class"), str(tmp_path / "dev")
+    assert bridge.find_link("1.1", sysfs, devdir) == devdir + "/ttyUSB1"
+    assert bridge.find_link("1.3", sysfs, devdir) is None
 
 
-def test_find_acm_ignores_foreign_usb_device(tmp_path):
-    make_acm(tmp_path, "ttyACM0", "1-1:1.0", vid="2341")
-    devdir = tmp_path / "dev"
-    devdir.mkdir()
-    (devdir / "ttyACM0").touch()
-    assert bridge.find_acm("1.0", str(tmp_path / "class"),
-                           str(devdir)) is None
+def test_find_link_ignores_foreign_usb_device(tmp_path):
+    make_usb_serial(tmp_path, "ttyUSB0", "1-1:1.0", vid="1a86")
+    assert bridge.find_link("1.0", str(tmp_path / "class"),
+                            str(tmp_path / "dev")) is None
+
+
+def test_bind_usb_serial_uses_first_available_driver_once(tmp_path):
+    (tmp_path / "vivopay").mkdir()
+    new_id = tmp_path / "vivopay" / "new_id"
+    new_id.write_text("")
+    assert bridge.bind_usb_serial(str(tmp_path)) == "vivopay"
+    assert new_id.read_text() == "1d6b 0104 ff\n"
+    # sysfs lists bound ids as "vid pid"; do not add the id twice
+    new_id.write_text("1d6b 0104\n")
+    assert bridge.bind_usb_serial(str(tmp_path)) == "vivopay"
+    assert new_id.read_text() == "1d6b 0104\n"
+
+
+def test_bind_usb_serial_without_driver(tmp_path):
+    assert bridge.bind_usb_serial(str(tmp_path)) is None
