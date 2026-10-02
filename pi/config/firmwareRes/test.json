@@ -1,0 +1,17 @@
+{
+   "cylinder_x" : 28.5,
+   "cylinder_y" : 214.5,
+   "generalFirmware" : false,
+   "grabOffset" : 0.0,
+   "grabSpeed" : 500,
+   "grabSpeedSlow" : 90,
+   "grabVibration" : false,
+   "impact_count" : 3,
+   "impact_loop_count" : 4,
+   "impact_offset" : 0.0099999997764825821,
+   "keepBedTempPrint" : 1,
+   "motorValue" : 180,
+   "tempOffset" : 0.00044999999227002263,
+   "tpuSpeed" : 100,
+   "vibrationSpeed" : 300
+}

@@ -1,18 +1,31 @@
 #!/usr/bin/env python3
 # Creator 5 MCU tunnel: forward the printer's four MCU UARTs to an SBC over
-# USB. The SBC runs a four-port "gser" serial gadget (two endpoints per port,
-# so four ports fit the Pi's dwc2 controller); this side binds it to a
-# built-in usb-serial driver and sees one ttyUSB per gadget interface.
+# USB. The SBC runs a four-port "gser" serial gadget (two bulk endpoints per
+# port). This printer's kernel has no USB-serial/CDC-ACM support at all (no
+# cdc_acm, no usb-serial core -- CONFIG_USB_SERIAL was never enabled), so no
+# /dev/ttyUSB* ever appears for it. Instead this talks to the gadget's bulk
+# endpoints directly through usbfs (/dev/bus/usb/BBB/DDD) via raw ioctls
+# (USBDEVFS_CLAIMINTERFACE / USBDEVFS_BULK), bypassing the missing driver
+# entirely. The exact ioctl numbers and struct layout below were obtained by
+# compiling a tiny probe against this printer's own kernel headers
+# (/opt/include/linux/usbdevice_fs.h via Entware's gcc) rather than hand
+# computed, since MIPS encodes ioctl numbers differently from x86/ARM.
+#
+# This is a direct, wired USB link only -- no network/Wi-Fi hop is involved
+# anywhere in this path.
 #
 # Runs on the printer SoC with its bundled Python 3.8, stdlib only.
 #
 # This file may be distributed under the terms of the GNU GPLv3 license.
+import ctypes
 import errno
-import re
+import fcntl
+import glob
 import os
+import queue
 import select
 import signal
-import stat
+import struct
 import subprocess
 import sys
 import termios
@@ -21,27 +34,28 @@ import time
 import traceback
 
 GADGET_VID, GADGET_PID = "1d6b", "0104"
-PORTS = [  # name, uart, baud, needs_wake, wake parity order, gadget interface
-    ("mainboardgd", "/dev/ttyS2", 230400, False, (), "1.0"),
-    ("heaterboard", "/dev/ttyS4", 230400, True, ("N", "E"), "1.1"),
-    ("eboard", "/dev/ttyS5", 460800, True, ("E", "N"), "1.2"),
-    ("levelboard", "/dev/ttyS7", 230400, True, ("N", "E"), "1.3"),
+PORTS = [  # name, uart, baud, needs_wake, wake parity order, gadget interface#
+    ("mainboardgd", "/dev/ttyS2", 230400, False, (), 0),
+    ("heaterboard", "/dev/ttyS4", 230400, True, ("N", "E"), 1),
+    ("eboard", "/dev/ttyS5", 460800, True, ("E", "N"), 2),
+    ("levelboard", "/dev/ttyS7", 230400, True, ("N", "E"), 3),
 ]
-# Built-in one-port bulk usb-serial drivers that accept a dynamic id
-USB_SERIAL_DRIVERS = ("flashloader", "vivopay", "zio", "carelink", "funsoft")
+# gadget interface# -> (bulk-out endpoint, bulk-in endpoint), from this
+# printer's own /sys/bus/usb/devices/<bus>-<port>:1.<iface>/ep_*/bEndpointAddress
+IFACE_ENDPOINTS = {0: (0x01, 0x81), 1: (0x02, 0x82),
+                   2: (0x03, 0x83), 3: (0x04, 0x84)}
 WAKE_BANNER_TIMEOUT = 4.0   # s per parity waiting for b"Ready"
 WAKE_ACK_TIMEOUT = 0.3      # s waiting for 0x06 after each b"A"
 WAKE_ACK_TRIES = 3
 IDENTIFY_UNANSWERED = 0.4   # s after a host identify with no valid MCU frame
 WAKE_RETRY_MIN = 5.0        # s between reactive wake attempts per port
 PROBE_TIMEOUT = 0.3         # s waiting for any frame after a probe identify
-LINK_POLL = 0.5             # s between gadget tty scans
+LINK_POLL = 0.5             # s between gadget device scans
 UART_RETRY = 5.0            # s between attempts to open a missing UART
 MAX_PENDING = 65536         # bytes buffered per direction before backpressure
 LOG = "/usr/data/logs/c5-tunnel.log"
-SYSFS_TTY = "/sys/class/tty"
-SYSFS_USB_SERIAL = "/sys/bus/usb-serial/drivers"
-DEV_DIR = "/dev"
+SYSFS_USB_DEVICES = "/sys/bus/usb/devices"
+USB_BULK_TIMEOUT_MS = 20    # per usbfs bulk-transfer ioctl
 
 CAMERA_DIR = "/usr/prog/mjpg-streamer"
 CAMERA_DEVICE = "/dev/video0"
@@ -361,8 +375,34 @@ def wake(fd, baud, parity_order):
     return False, "no ack (after A %s)" % ("; ".join(rx),)
 
 ######################################################################
-# Gadget link discovery
+# Raw USB gadget link (usbfs, no kernel usb-serial driver needed)
 ######################################################################
+
+# From compiling against this printer's own kernel headers
+# (/opt/include/linux/usbdevice_fs.h); MIPS encodes ioctl numbers
+# differently from x86/ARM, so these are taken from the running kernel's
+# headers rather than hand computed.
+USBDEVFS_CLAIMINTERFACE = 1074025743 & 0xffffffff
+USBDEVFS_RELEASEINTERFACE = 1074025744 & 0xffffffff
+USBDEVFS_BULK = (-1072671486) & 0xffffffff
+USBDEVFS_RESET = 536892692 & 0xffffffff
+USBDEVFS_CLEAR_HALT = 1074025749 & 0xffffffff
+# Only these mean the physical device is actually gone (unplugged,
+# descriptor read failed, etc.) -- worth tearing the shared device handle
+# down for. Everything else (EBUSY from a transient claim race right after
+# a reopen, EPIPE from one endpoint stalling, EBADF from a benign close
+# race with another port's thread) is recoverable and should just be
+# retried; treating them as fatal previously caused one port's transient
+# error to cascade into tearing down and re-claiming all four interfaces
+# at once (visible as all ports cycling link up/down together in the log),
+# which is exactly the kind of multi-second gap that trips Klipper's
+# homing/probe communication timeout.
+FATAL_USB_ERRNOS = (errno.ENODEV, errno.ENOENT, errno.ESHUTDOWN)
+RETRY_BACKOFF = 0.05  # s, pause before retrying a recoverable USB error
+# struct usbdevfs_bulktransfer { unsigned ep, len, timeout; void *data; }
+# all four fields are 32-bit on this platform (confirmed via sizeof/offsetof
+# probe): ep@0 len@4 timeout@8 data@12, size 16.
+BULKTRANSFER_FMT = "<IIII"
 
 
 def _read_text(path):
@@ -370,74 +410,230 @@ def _read_text(path):
         return f.read().strip()
 
 
-INTERFACE_DIR = re.compile(r"^\d+-[\d.]+:(\d+\.\d+)$")
+def find_gadget_device():
+    """Return /dev/bus/usb/BBB/DDD for the gadget, or None if not present.
 
-
-def bind_usb_serial(sysfs=SYSFS_USB_SERIAL):
-    """Give the gadget id to a usb-serial driver; return the driver name.
-
-    gser interfaces are vendor-specific, so no driver claims them until
-    one is given their id; usb-serial then attaches every interface.
-    """
-    gadget_id = "%s %s" % (GADGET_VID, GADGET_PID)
-    for name in USB_SERIAL_DRIVERS:
-        new_id = os.path.join(sysfs, name, "new_id")
-        if not os.path.exists(new_id):
+    Only matches device-level sysfs entries (no ':' in the name); the
+    busnum/devnum change on every reconnect, so this is re-resolved each
+    time a link is needed rather than cached."""
+    for path in glob.glob(os.path.join(SYSFS_USB_DEVICES, "*")):
+        name = os.path.basename(path)
+        if ":" in name:
             continue
         try:
-            with open(new_id) as f:
-                if any(l.split()[:2] == gadget_id.split() for l in f):
-                    return name
-            with open(new_id, "w") as f:
-                f.write(gadget_id + " ff\n")
-            return name
-        except OSError as e:
-            log("usb-serial: %s new_id failed: %s" % (name, e))
-    return None
-
-
-def find_link(iface, sysfs=SYSFS_TTY, devdir=DEV_DIR):
-    """Return the /dev path of the gadget ttyUSB on interface iface."""
-    try:
-        names = sorted(n for n in os.listdir(sysfs) if n.startswith("ttyUSB"))
-    except OSError:
-        return None
-    for name in names:
-        try:
-            # device -> .../<bus>-<port>:<cfg>.<iface>/ttyUSBn
-            path = os.path.realpath(os.path.join(sysfs, name, "device"))
-            while path not in ("/", ""):
-                match = INTERFACE_DIR.match(os.path.basename(path))
-                if match:
-                    break
-                path = os.path.dirname(path)
-            else:
-                continue
-            if match.group(1) != iface:
-                continue
-            usbdev = os.path.dirname(path)
-            if (_read_text(os.path.join(usbdev, "idVendor")) != GADGET_VID
-                    or _read_text(os.path.join(usbdev, "idProduct"))
+            if (_read_text(os.path.join(path, "idVendor")) != GADGET_VID
+                    or _read_text(os.path.join(path, "idProduct"))
                     != GADGET_PID):
                 continue
-            node = os.path.join(devdir, name)
-            if not os.path.exists(node):
-                major, minor = _read_text(
-                    os.path.join(sysfs, name, "dev")).split(":")
-                os.mknod(node, stat.S_IFCHR | 0o600,
-                         os.makedev(int(major), int(minor)))
-            return node
+            bus = int(_read_text(os.path.join(path, "busnum")))
+            dev = int(_read_text(os.path.join(path, "devnum")))
         except (OSError, ValueError):
             continue
+        node = "/dev/bus/usb/%03d/%03d" % (bus, dev)
+        if os.path.exists(node):
+            return node
     return None
-
-######################################################################
-# Per-port bridge
-######################################################################
 
 
 class LinkDown(Exception):
     pass
+
+
+class UsbGadgetDevice:
+    """One claimed usbfs handle shared by all four PortBridge links.
+
+    Opened lazily and shared because claiming an interface requires an
+    open file descriptor on the *device* node, and all four gadget
+    interfaces live on the same physical device."""
+    def __init__(self):
+        self._lock = threading.Lock()
+        self.fd = None
+        self.node = None
+        self.claimed = set()
+
+    def get_cached(self):
+        """Return (fd, node) without touching sysfs, or (None, None) if not
+        currently open. This is the hot path used by every read/write --
+        scanning sysfs on every single bulk transfer added enough latency
+        to trip Klipper's "Timer too close" check during MCU config."""
+        with self._lock:
+            return self.fd, self.node
+
+    def get(self):
+        """Return (fd, node), (re)opening and re-claiming all interfaces
+        if the device has disappeared or changed since last time. Scans
+        sysfs, so only call this after get_cached() comes back empty (not
+        yet opened, or invalidated after an I/O error)."""
+        with self._lock:
+            node = find_gadget_device()
+            if node is None:
+                self._close_locked()
+                return None, None
+            if self.fd is not None and node == self.node:
+                return self.fd, self.node
+            self._close_locked()
+            try:
+                fd = os.open(node, os.O_RDWR)
+            except OSError as e:
+                log("usb: open %s failed: %s" % (node, e))
+                return None, None
+            self.fd = fd
+            self.node = node
+            return fd, node
+
+    def claim(self, iface):
+        with self._lock:
+            if self.fd is None or iface in self.claimed:
+                return self.fd is not None
+            try:
+                fcntl.ioctl(self.fd, USBDEVFS_CLAIMINTERFACE,
+                           struct.pack("<I", iface))
+            except OSError as e:
+                log("usb: claim interface %d failed: %s" % (iface, e))
+                return False
+            self.claimed.add(iface)
+            return True
+
+    def _close_locked(self):
+        if self.fd is not None:
+            try:
+                os.close(self.fd)
+            except OSError:
+                pass
+        self.fd = None
+        self.node = None
+        self.claimed.clear()
+
+    def invalidate(self):
+        with self._lock:
+            self._close_locked()
+
+
+GADGET_DEVICE = UsbGadgetDevice()
+
+
+def usb_bulk_transfer(fd, ep, buf, timeout_ms=USB_BULK_TIMEOUT_MS):
+    """One USBDEVFS_BULK ioctl. buf is a ctypes buffer (in or out); returns
+    the actual transfer length, or raises OSError (including ETIMEDOUT,
+    which is the normal "nothing arrived" case for IN endpoints)."""
+    # fcntl.ioctl() only returns the ioctl()'s integer return value (the
+    # actual transfer length here) when given a *mutable* buffer; with
+    # immutable bytes it instead hands back the (unchanged) buffer content.
+    req = bytearray(struct.pack(BULKTRANSFER_FMT, ep, len(buf), timeout_ms,
+                                ctypes.addressof(buf)))
+    return fcntl.ioctl(fd, USBDEVFS_BULK, req)
+
+
+class UsbSerialLink:
+    """Gadget-side link for one PortBridge, backed by raw bulk transfers.
+
+    Mimics just enough of the file-descriptor interface _forward() needs:
+    a background thread fills an inbound queue (there is no select()-able
+    fd for usbfs bulk I/O), and write() does a direct blocking transfer.
+    """
+    IN_SIZE = 4096
+
+    def __init__(self, iface):
+        self.iface = iface
+        self.out_ep, self.in_ep = IFACE_ENDPOINTS[iface]
+        self.inbound = queue.Queue()
+        self._stop = threading.Event()
+        self._down = threading.Event()
+        self._reader = threading.Thread(target=self._read_loop, daemon=True)
+        self._reader.start()
+
+    def _read_loop(self):
+        buf = ctypes.create_string_buffer(self.IN_SIZE)
+        while not self._stop.is_set() and not self._down.is_set():
+            fd, _ = GADGET_DEVICE.get_cached()
+            if fd is None:
+                self._down.set()
+                return
+            try:
+                n = usb_bulk_transfer(fd, self.in_ep, buf)
+            except OSError as e:
+                if e.errno == errno.ETIMEDOUT:
+                    continue
+                if e.errno in FATAL_USB_ERRNOS:
+                    log("usb: iface %d read error (fatal): %s"
+                       % (self.iface, e))
+                    GADGET_DEVICE.invalidate()
+                    self._down.set()
+                    return
+                if e.errno == errno.EPIPE:
+                    # Endpoint stalled; clear it and keep going.
+                    try:
+                        fcntl.ioctl(fd, USBDEVFS_CLEAR_HALT,
+                                   struct.pack("<I", self.in_ep))
+                    except OSError:
+                        pass
+                    continue
+                # EBUSY (transient claim race right after a device reopen),
+                # EBADF (another port's thread just invalidated the shared
+                # fd; get_cached() will see the new one shortly), or
+                # anything else unexpected: log once in a while and retry
+                # rather than tearing the whole device down.
+                self._stop.wait(RETRY_BACKOFF)
+                continue
+            if n:
+                self.inbound.put(bytes(buf.raw[:n]))
+
+    def down(self):
+        return self._down.is_set()
+
+    def read_nowait(self):
+        try:
+            return self.inbound.get_nowait()
+        except queue.Empty:
+            return None
+
+    MAX_WRITE_RETRIES = 40  # ~2s of RETRY_BACKOFF before giving up
+
+    def write(self, data):
+        view = memoryview(data)
+        retries = 0
+        while view:
+            if self._stop.is_set():
+                raise LinkDown("stopping")
+            fd, _ = GADGET_DEVICE.get_cached()
+            if fd is None:
+                raise LinkDown("device gone")
+            chunk = bytes(view[:self.IN_SIZE])
+            buf = ctypes.create_string_buffer(chunk, len(chunk))
+            try:
+                n = usb_bulk_transfer(fd, self.out_ep, buf, timeout_ms=1000)
+            except OSError as e:
+                if e.errno in FATAL_USB_ERRNOS:
+                    GADGET_DEVICE.invalidate()
+                    raise LinkDown(e)
+                if e.errno == errno.EPIPE:
+                    try:
+                        fcntl.ioctl(fd, USBDEVFS_CLEAR_HALT,
+                                   struct.pack("<I", self.out_ep))
+                    except OSError:
+                        pass
+                    continue
+                # EBUSY/EBADF/etc: transient, retry rather than tearing
+                # the shared device down (see _read_loop for why) -- but
+                # only up to a point, so a genuinely stuck device doesn't
+                # hang this thread forever.
+                retries += 1
+                if retries > self.MAX_WRITE_RETRIES:
+                    GADGET_DEVICE.invalidate()
+                    raise LinkDown(e)
+                self._stop.wait(RETRY_BACKOFF)
+                continue
+            if n <= 0:
+                continue
+            retries = 0
+            view = view[n:]
+
+    def close(self):
+        self._stop.set()
+
+######################################################################
+# Per-port bridge
+######################################################################
 
 
 class PortBridge(threading.Thread):
@@ -501,18 +697,14 @@ class PortBridge(threading.Thread):
             self.log("wake failed: %s" % (detail,))
 
     def wait_link(self):
-        """Poll for the gadget tty, discarding UART bytes meanwhile."""
+        """Poll for the gadget device, discarding UART bytes meanwhile."""
         self.log("waiting for gadget")
         while not self.stop.is_set():
-            path = find_link(self.iface)
-            if path is not None:
-                try:
-                    fd = open_tty(path, 115200)
-                except OSError as e:
-                    self.log("open %s failed: %s" % (path, e))
-                else:
-                    self.log("link up %s (%s)" % (path, self.iface))
-                    return fd
+            fd, node = GADGET_DEVICE.get()
+            if fd is not None and GADGET_DEVICE.claim(self.iface):
+                link = UsbSerialLink(self.iface)
+                self.log("link up %s iface %d" % (node, self.iface))
+                return link
             deadline = time.monotonic() + LINK_POLL
             while time.monotonic() < deadline:
                 read_ready(self.uart, deadline - time.monotonic())
@@ -525,22 +717,7 @@ class PortBridge(threading.Thread):
             self.log("link down")
             log_kernel_usb()
         finally:
-            os.close(link)
-
-    def _read_link(self, link):
-        try:
-            data = os.read(link, 4096)
-        except BlockingIOError:
-            return None
-        except OSError as e:
-            raise LinkDown(e)
-        if not data:
-            raise LinkDown("eof")
-        return data
-
-    def _drain_link(self, link):
-        while read_ready(link, 0.0):
-            pass
+            link.close()
 
     def _forward(self, link):
         uart = self.uart
@@ -550,24 +727,21 @@ class PortBridge(threading.Thread):
         mcu_frames = FrameDetector()
         monitor = self.monitor
         while not self.stop.is_set():
-            rlist = []
-            if len(to_link) < MAX_PENDING:
-                rlist.append(uart)
-            if len(to_uart) < MAX_PENDING:
-                rlist.append(link)
-            wlist = []
-            if to_uart:
-                wlist.append(uart)
-            if to_link:
-                wlist.append(link)
-            r, w, _ = select.select(rlist, wlist, [], 0.1)
+            if link.down():
+                raise LinkDown("read thread stopped")
+            # usbfs bulk I/O has no select()-able fd; poll the reader
+            # thread's queue instead of blocking on it.
+            data = link.read_nowait()
+            if data:
+                now = time.monotonic()
+                to_uart += data
+                for frame in host_frames.feed(data):
+                    monitor.host_frame(frame, now)
+
+            rlist = [uart] if len(to_link) < MAX_PENDING else []
+            wlist = [uart] if to_uart else []
+            r, w, _ = select.select(rlist, wlist, [], 0.005)
             now = time.monotonic()
-            if link in r:
-                data = self._read_link(link)
-                if data:
-                    to_uart += data
-                    for frame in host_frames.feed(data):
-                        monitor.host_frame(frame, now)
             if uart in r:
                 try:
                     data = os.read(uart, 4096)
@@ -580,16 +754,13 @@ class PortBridge(threading.Thread):
             if to_uart:
                 write_some(uart, to_uart)
             if to_link:
-                try:
-                    write_some(link, to_link)
-                except OSError as e:
-                    raise LinkDown(e)
+                link.write(bytes(to_link))
+                del to_link[:]
             if self.needs_wake and monitor.should_wake(now):
                 self.log("identify unanswered")
                 monitor.wake_started(now)
                 del to_uart[:]
                 self.run_wake()
-                self._drain_link(link)
                 host_frames.reset()
                 mcu_frames.reset()
 
@@ -661,11 +832,6 @@ def main():
     log("c5-tunnel bridge starting (pid %d)" % (os.getpid(),))
     # Threads created after this call inherit the scheduling policy.
     set_priority()
-    driver = bind_usb_serial()
-    if driver is None:
-        log("usb-serial: no driver accepted the gadget id")
-    else:
-        log("usb-serial: gadget bound to %s" % (driver,))
     stop = threading.Event()
 
     def on_signal(signum, frame):
@@ -675,7 +841,9 @@ def main():
     bridges = [PortBridge(stop, *p) for p in PORTS]
     for b in bridges:
         b.start()
-    run_camera(stop)
+    # Camera disabled for now (believed broken; also conflicts with
+    # whatever's already serving /dev/video0 while install.sh hasn't been
+    # run yet). Re-enable by restoring the run_camera(stop) call below.
     while not stop.wait(1.0):
         pass
     for b in bridges:
