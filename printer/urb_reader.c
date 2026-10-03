@@ -8,11 +8,22 @@
  * isochronous traffic down to ~2fps on the shared bus, regardless of the
  * camera's own resolution/fps settings.
  *
- * The fix is to keep exactly one outstanding async read URB per endpoint
+ * The fix is to keep several outstanding async read URBs per endpoint
  * (USBDEVFS_SUBMITURB / REAPURBNDELAY) instead of continuously re-issuing
  * blocking transfers -- this lets the host controller's own NAK-holdoff
  * back off during genuinely idle stretches instead of us forcing a new
  * bus transaction every 20ms regardless of whether there's any data.
+ *
+ * A first version of this kept only ONE outstanding read per endpoint
+ * (resubmitting it immediately on each completion). That fixed the camera
+ * starvation but introduced a new problem under real motion/homing
+ * traffic: klipper's own retransmit counters showed 40-55% packet loss
+ * during G28, because between a read completing and us resubmitting it,
+ * there's a window where the endpoint has no buffer to receive into at
+ * all -- fine at idle (nothing arrives in that window), not fine under
+ * sustained bursty traffic. Keeping NUM_BUFS buffers outstanding per
+ * endpoint at all times means there's always at least one ready while
+ * any of the others are being drained/resubmitted.
  *
  * This was first attempted directly in Python via ctypes/fcntl.ioctl, but
  * proved unreliable there: a side-by-side C vs Python test against the
@@ -56,12 +67,17 @@
 
 #define MAX_PORTS 8
 #define READ_SIZE 4096
+#define NUM_BUFS 4
+
+struct urb_slot {
+    unsigned char buf[READ_SIZE];
+    struct usbdevfs_urb urb;
+};
 
 struct port {
     int iface;
     unsigned char ep;
-    unsigned char buf[READ_SIZE];
-    struct usbdevfs_urb urb;
+    struct urb_slot slots[NUM_BUFS];
     int down;
 };
 
@@ -96,13 +112,13 @@ static void emit_data(int iface, const unsigned char *data, unsigned int len) {
     if (len) write_all(1, data, len);
 }
 
-static int submit(int fd, struct port *p) {
-    memset(&p->urb, 0, sizeof(p->urb));
-    p->urb.type = USBDEVFS_URB_TYPE_BULK;
-    p->urb.endpoint = p->ep;
-    p->urb.buffer = p->buf;
-    p->urb.buffer_length = READ_SIZE;
-    if (ioctl(fd, USBDEVFS_SUBMITURB, &p->urb) < 0) {
+static int submit(int fd, struct port *p, struct urb_slot *s) {
+    memset(&s->urb, 0, sizeof(s->urb));
+    s->urb.type = USBDEVFS_URB_TYPE_BULK;
+    s->urb.endpoint = p->ep;
+    s->urb.buffer = s->buf;
+    s->urb.buffer_length = READ_SIZE;
+    if (ioctl(fd, USBDEVFS_SUBMITURB, &s->urb) < 0) {
         fprintf(stderr, "urb_reader: submiturb iface %d ep 0x%02x: %s\n",
                 p->iface, p->ep, strerror(errno));
         return -1;
@@ -140,9 +156,12 @@ int main(int argc, char **argv) {
     }
 
     for (int i = 0; i < nports; i++) {
-        if (submit(fd, &ports[i]) < 0) {
-            ports[i].down = 1;
-            emit_down(ports[i].iface);
+        for (int b = 0; b < NUM_BUFS; b++) {
+            if (submit(fd, &ports[i], &ports[i].slots[b]) < 0) {
+                ports[i].down = 1;
+                emit_down(ports[i].iface);
+                break;
+            }
         }
     }
 
@@ -178,28 +197,39 @@ int main(int argc, char **argv) {
         }
 
         struct port *p = NULL;
-        for (int i = 0; i < nports; i++) {
-            if (&ports[i].urb == (struct usbdevfs_urb *)reaped) { p = &ports[i]; break; }
+        struct urb_slot *s = NULL;
+        for (int i = 0; i < nports && s == NULL; i++) {
+            for (int b = 0; b < NUM_BUFS; b++) {
+                if (&ports[i].slots[b].urb == (struct usbdevfs_urb *)reaped) {
+                    p = &ports[i];
+                    s = &ports[i].slots[b];
+                    break;
+                }
+            }
         }
         if (p == NULL) continue; /* shouldn't happen; ignore defensively */
+        if (p->down) continue; /* already given up on this interface */
 
-        if (p->urb.status == 0) {
-            if (p->urb.actual_length > 0)
-                emit_data(p->iface, p->buf, (unsigned int)p->urb.actual_length);
-            if (submit(fd, p) < 0) {
+        if (s->urb.status == 0) {
+            if (s->urb.actual_length > 0)
+                emit_data(p->iface, s->buf, (unsigned int)s->urb.actual_length);
+            if (submit(fd, p, s) < 0) {
                 p->down = 1;
                 emit_down(p->iface);
             }
-        } else if (p->urb.status == -EPIPE) {
+        } else if (s->urb.status == -EPIPE) {
             ioctl(fd, USBDEVFS_CLEAR_HALT, &p->ep);
-            if (submit(fd, p) < 0) {
+            if (submit(fd, p, s) < 0) {
                 p->down = 1;
                 emit_down(p->iface);
             }
         } else {
             /* ENODEV/ESHUTDOWN/ENOENT/ECONNRESET/etc: treat as down for
              * this interface; the Python side reacts the same way
-             * regardless of which fatal reason caused it. */
+             * regardless of which fatal reason caused it. The other
+             * still-outstanding slots for this port will keep reaping
+             * with the same fatal status as they complete, but p->down
+             * being set makes us skip re-emitting/resubmitting for them. */
             p->down = 1;
             emit_down(p->iface);
         }
