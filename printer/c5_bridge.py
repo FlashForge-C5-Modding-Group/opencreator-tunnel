@@ -439,6 +439,57 @@ class LinkDown(Exception):
     pass
 
 
+URB_READER_SRC = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                              "urb_reader.c")
+URB_READER_BIN = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                              "urb_reader")
+
+
+def ensure_urb_reader_binary():
+    """Compile urb_reader.c with Entware's gcc if the binary isn't already
+    there. See urb_reader.c's own header comment for why the async read
+    path lives there instead of in this file: a side-by-side C vs Python
+    ctypes/fcntl.ioctl test against the same device showed the C version
+    correctly round-tripping a submitted/reaped URB address and real data,
+    while the Python version did not, for reasons not pinned down despite
+    several attempts -- rather than keep fighting that layer, this one
+    small, focused piece is C, reached over a pipe from the rest of this
+    (otherwise unchanged, already-working) Python bridge."""
+    if os.path.exists(URB_READER_BIN):
+        return True
+    gcc = "/opt/bin/gcc"
+    if not os.path.exists(gcc):
+        log("usb: urb_reader.c present but no gcc at %s to build it" % gcc)
+        return False
+    env = dict(os.environ)
+    env["PATH"] = "/opt/bin:" + env.get("PATH", "")
+    try:
+        subprocess.run([gcc, "-O2", "-I", "/opt/include", "-o",
+                        URB_READER_BIN, URB_READER_SRC],
+                      env=env, check=True,
+                      stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    except (OSError, subprocess.CalledProcessError) as e:
+        out = getattr(e, "output", b"")
+        log("usb: failed to build urb_reader: %s %s"
+           % (e, out.decode(errors="replace") if out else ""))
+        return False
+    log("usb: built urb_reader")
+    return True
+
+
+def _read_exact(f, n):
+    """Read exactly n bytes from a file object, or None on EOF/short read."""
+    if n == 0:
+        return b""
+    buf = bytearray()
+    while len(buf) < n:
+        chunk = f.read(n - len(buf))
+        if not chunk:
+            return None
+        buf += chunk
+    return bytes(buf)
+
+
 class UsbGadgetDevice:
     """One claimed usbfs handle shared by all four PortBridge links.
 
@@ -450,6 +501,9 @@ class UsbGadgetDevice:
         self.fd = None
         self.node = None
         self.claimed = set()
+        self.links = {}  # iface -> UsbSerialLink, for urb_reader dispatch
+        self._reader_proc = None
+        self._reader_thread = None
 
     def get_cached(self):
         """Return (fd, node) without touching sysfs, or (None, None) if not
@@ -494,7 +548,92 @@ class UsbGadgetDevice:
             self.claimed.add(iface)
             return True
 
+    def register_link(self, iface, link):
+        """Called once by each UsbSerialLink as it's constructed. Starts
+        the shared urb_reader subprocess once every interface has both
+        been claimed and has a link registered for it (whichever
+        PortBridge is last to connect triggers the actual launch; the
+        others just sit with an empty inbound queue until it's up,
+        exactly as if their own read simply hadn't produced data yet)."""
+        with self._lock:
+            self.links[iface] = link
+            self._maybe_start_reader_locked()
+
+    def unregister_link(self, iface, link):
+        with self._lock:
+            if self.links.get(iface) is link:
+                del self.links[iface]
+
+    def _maybe_start_reader_locked(self):
+        if (self._reader_proc is not None or self.fd is None
+                or not all(i in self.claimed for i in IFACE_ENDPOINTS)
+                or not all(i in self.links for i in IFACE_ENDPOINTS)):
+            return
+        if not ensure_urb_reader_binary():
+            return
+        args = [URB_READER_BIN, str(self.fd)]
+        for iface in sorted(IFACE_ENDPOINTS):
+            _, in_ep = IFACE_ENDPOINTS[iface]
+            args += [str(iface), str(in_ep)]
+        try:
+            proc = subprocess.Popen(
+                args, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                pass_fds=(self.fd,))
+        except OSError as e:
+            log("usb: failed to start urb_reader: %s" % e)
+            return
+        self._reader_proc = proc
+        self._reader_thread = threading.Thread(
+            target=self._reader_loop, args=(proc,), daemon=True)
+        self._reader_thread.start()
+        log("usb: urb_reader started (pid %d)" % proc.pid)
+
+    def _reader_loop(self, proc):
+        """Runs on its own thread for the lifetime of one urb_reader
+        subprocess: parses its framed stdout and dispatches each
+        completed read to the matching UsbSerialLink's inbound queue. See
+        urb_reader.c for the frame format."""
+        stdout = proc.stdout
+        try:
+            while True:
+                header = _read_exact(stdout, 5)
+                if header is None:
+                    break
+                iface = header[0]
+                (length,) = struct.unpack("<I", header[1:])
+                if length == 0xFFFFFFFF:
+                    link = self.links.get(iface)
+                    if link is not None:
+                        link._mark_down()
+                    continue
+                data = _read_exact(stdout, length) if length else b""
+                if data is None:
+                    break
+                link = self.links.get(iface)
+                if link is not None and data:
+                    link.inbound.put(data)
+        finally:
+            with self._lock:
+                if self._reader_proc is proc:
+                    self._reader_proc = None
+            # The helper exiting (for any reason -- device gone, killed on
+            # a reconnect, crashed) means every port it was serving is
+            # down; each PortBridge's own reconnect loop handles the rest.
+            for link in list(self.links.values()):
+                link._mark_down()
+
     def _close_locked(self):
+        if self._reader_proc is not None:
+            proc = self._reader_proc
+            self._reader_proc = None
+            try:
+                proc.stdin.close()
+            except (OSError, ValueError):
+                pass
+            try:
+                proc.terminate()
+            except OSError:
+                pass
         if self.fd is not None:
             try:
                 os.close(self.fd)
@@ -503,6 +642,7 @@ class UsbGadgetDevice:
         self.fd = None
         self.node = None
         self.claimed.clear()
+        self.links.clear()
 
     def invalidate(self):
         with self._lock:
@@ -525,11 +665,18 @@ def usb_bulk_transfer(fd, ep, buf, timeout_ms=USB_BULK_TIMEOUT_MS):
 
 
 class UsbSerialLink:
-    """Gadget-side link for one PortBridge, backed by raw bulk transfers.
+    """Gadget-side link for one PortBridge.
 
-    Mimics just enough of the file-descriptor interface _forward() needs:
-    a background thread fills an inbound queue (there is no select()-able
-    fd for usbfs bulk I/O), and write() does a direct blocking transfer.
+    Reads are handled by the shared urb_reader subprocess (see
+    UsbGadgetDevice.register_link/_reader_loop and urb_reader.c) -- async
+    URBs kept outstanding per endpoint instead of each port continuously
+    re-submitting a new blocking read the instant the last one times out,
+    which was proven (via A/B/C testing) to starve the camera's USB
+    traffic down to ~2fps regardless of the camera's own settings, simply
+    by keeping the bus constantly busy with bulk-IN polling even at
+    complete idle. write() is unchanged from the original synchronous
+    USBDEVFS_BULK approach -- it only runs when there's actually data to
+    send, so it was never part of that problem.
     """
     IN_SIZE = 4096
 
@@ -539,44 +686,10 @@ class UsbSerialLink:
         self.inbound = queue.Queue()
         self._stop = threading.Event()
         self._down = threading.Event()
-        self._reader = threading.Thread(target=self._read_loop, daemon=True)
-        self._reader.start()
+        GADGET_DEVICE.register_link(iface, self)
 
-    def _read_loop(self):
-        buf = ctypes.create_string_buffer(self.IN_SIZE)
-        while not self._stop.is_set() and not self._down.is_set():
-            fd, _ = GADGET_DEVICE.get_cached()
-            if fd is None:
-                self._down.set()
-                return
-            try:
-                n = usb_bulk_transfer(fd, self.in_ep, buf)
-            except OSError as e:
-                if e.errno == errno.ETIMEDOUT:
-                    continue
-                if e.errno in FATAL_USB_ERRNOS:
-                    log("usb: iface %d read error (fatal): %s"
-                       % (self.iface, e))
-                    GADGET_DEVICE.invalidate()
-                    self._down.set()
-                    return
-                if e.errno == errno.EPIPE:
-                    # Endpoint stalled; clear it and keep going.
-                    try:
-                        fcntl.ioctl(fd, USBDEVFS_CLEAR_HALT,
-                                   struct.pack("<I", self.in_ep))
-                    except OSError:
-                        pass
-                    continue
-                # EBUSY (transient claim race right after a device reopen),
-                # EBADF (another port's thread just invalidated the shared
-                # fd; get_cached() will see the new one shortly), or
-                # anything else unexpected: log once in a while and retry
-                # rather than tearing the whole device down.
-                self._stop.wait(RETRY_BACKOFF)
-                continue
-            if n:
-                self.inbound.put(bytes(buf.raw[:n]))
+    def _mark_down(self):
+        self._down.set()
 
     def down(self):
         return self._down.is_set()
@@ -630,6 +743,7 @@ class UsbSerialLink:
 
     def close(self):
         self._stop.set()
+        GADGET_DEVICE.unregister_link(self.iface, self)
 
 ######################################################################
 # Per-port bridge
