@@ -648,6 +648,19 @@ class UsbGadgetDevice:
         with self._lock:
             self._close_locked()
 
+    def heartbeat(self):
+        """Heartbeat signal, checks if it's died due to unforseen issues, and automatically kills if so."""
+        with self._lock:
+            if self.fd is None:
+                return  # nothing open yet; wait_link() handles this
+            stuck = (self._reader_proc is None
+                     or self._reader_proc.poll() is not None)
+            if not stuck:
+                return
+            log("usb: heartbeat found urb_reader missing/dead with the"
+               " device still open -- forcing a full reconnect")
+            self._close_locked()
+
 
 GADGET_DEVICE = UsbGadgetDevice()
 
@@ -941,6 +954,14 @@ def set_priority():
         log("sched: nice -20")
 
 
+HEARTBEAT_INTERVAL_S = 60
+
+
+def heartbeat_loop(stop):
+    while not stop.wait(HEARTBEAT_INTERVAL_S):
+        GADGET_DEVICE.heartbeat()
+
+
 def main():
     open_log()
     log("c5-tunnel bridge starting (pid %d)" % (os.getpid(),))
@@ -955,6 +976,7 @@ def main():
     bridges = [PortBridge(stop, *p) for p in PORTS]
     for b in bridges:
         b.start()
+    threading.Thread(target=heartbeat_loop, args=(stop,), daemon=True).start()
     # Camera disabled for now (believed broken; also conflicts with
     # whatever's already serving /dev/video0 while install.sh hasn't been
     # run yet). Re-enable by restoring the run_camera(stop) call below.
