@@ -171,6 +171,30 @@ int main(int argc, char **argv) {
      * spinning forever holding the device claimed. */
     struct pollfd stdin_pfd = { .fd = 0, .events = POLLIN };
 
+    /* Idle-poll backoff: adaptive rather than a fixed 2ms sleep. A fixed
+     * sleep is invisible to idle MCU chatter but adds up to 2ms of
+     * worst-case latency on every read -- fine for ordinary stats
+     * traffic, but enough to occasionally miss the much tighter deadline
+     * klipper's cross-MCU trsync check-in uses during a homing move
+     * (trsync failing aborts the move instantly with "Communication
+     * timeout during homing": stepper_y and the probe both home via
+     * eboard's endstops while being stepped from the main MCU, so a brief
+     * host-side delay on either link can trip it, even though it's far
+     * too short to ever show up as a retransmit in klipper's own
+     * per-second stats).
+     *
+     * Resetting to 0 on every successful reap means a run of back-to-back
+     * completions (the bursty case during active motion) gets reaped with
+     * no sleep between them; backing off up to IDLE_SLEEP_MAX_US only
+     * after many consecutive misses keeps CPU use low during genuine
+     * idle. REAPURBNDELAY itself is a local ioctl query, not a bus
+     * transaction, so spinning on it briefly during real activity doesn't
+     * reintroduce the original bug (that was about forcing new bus
+     * transactions continuously, not local CPU polling). */
+    #define IDLE_SLEEP_MAX_US 2000
+    #define IDLE_SLEEP_STEP_US 20
+    unsigned int idle_sleep_us = 0;
+
     for (;;) {
         int any_up = 0;
         for (int i = 0; i < nports; i++) if (!ports[i].down) any_up = 1;
@@ -192,9 +216,13 @@ int main(int argc, char **argv) {
                 }
                 break;
             }
-            usleep(2000);
+            if (idle_sleep_us > 0)
+                usleep(idle_sleep_us);
+            if (idle_sleep_us < IDLE_SLEEP_MAX_US)
+                idle_sleep_us += IDLE_SLEEP_STEP_US;
             continue;
         }
+        idle_sleep_us = 0;
 
         struct port *p = NULL;
         struct urb_slot *s = NULL;
