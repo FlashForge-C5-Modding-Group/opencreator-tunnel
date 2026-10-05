@@ -853,6 +853,7 @@ class PortBridge(threading.Thread):
         host_frames = FrameDetector()
         mcu_frames = FrameDetector()
         monitor = self.monitor
+        select_timeout = 0.001 if self.baud >= 460800 else 0.002
         while not self.stop.is_set():
             if link.down():
                 raise LinkDown("read thread stopped")
@@ -867,7 +868,7 @@ class PortBridge(threading.Thread):
 
             rlist = [uart] if len(to_link) < MAX_PENDING else []
             wlist = [uart] if to_uart else []
-            r, w, _ = select.select(rlist, wlist, [], 0.005)
+            r, w, _ = select.select(rlist, wlist, [], select_timeout)
             now = time.monotonic()
             if uart in r:
                 try:
