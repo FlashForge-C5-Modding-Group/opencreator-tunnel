@@ -61,6 +61,7 @@
 #include <unistd.h>
 #include <errno.h>
 #include <poll.h>
+#include <sys/uio.h>
 #include <sys/ioctl.h>
 #include <linux/ioctl.h>
 #include <linux/usbdevice_fs.h>
@@ -89,6 +90,7 @@ static void write_all(int fd, const void *buf, size_t len) {
             if (errno == EINTR) continue;
             exit(1); /* stdout gone -- parent died, nothing to do */
         }
+        if (n == 0) exit(1); /* avoid spinning if the pipe cannot progress */
         p += n;
         len -= (size_t)n;
     }
@@ -108,8 +110,30 @@ static void emit_data(int iface, const unsigned char *data, unsigned int len) {
     hdr[2] = (unsigned char)((len >> 8) & 0xFF);
     hdr[3] = (unsigned char)((len >> 16) & 0xFF);
     hdr[4] = (unsigned char)((len >> 24) & 0xFF);
-    write_all(1, hdr, sizeof(hdr));
-    if (len) write_all(1, data, len);
+    struct iovec vectors[2] = {
+        { .iov_base = hdr, .iov_len = sizeof(hdr) },
+        { .iov_base = (void *)data, .iov_len = len },
+    };
+    struct iovec *next = vectors;
+    int count = len ? 2 : 1;
+    while (count) {
+        ssize_t n = writev(1, next, count);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            exit(1);
+        }
+        if (n == 0) exit(1);
+        size_t written = (size_t)n;
+        while (count && written >= next->iov_len) {
+            written -= next->iov_len;
+            next++;
+            count--;
+        }
+        if (count && written) {
+            next->iov_base = (unsigned char *)next->iov_base + written;
+            next->iov_len -= written;
+        }
+    }
 }
 
 static int submit(int fd, struct port *p, struct urb_slot *s) {
@@ -246,7 +270,14 @@ int main(int argc, char **argv) {
                 emit_down(p->iface);
             }
         } else if (s->urb.status == -EPIPE) {
-            ioctl(fd, USBDEVFS_CLEAR_HALT, &p->ep);
+            /* usbfs expects a 32-bit endpoint number, not the address of
+             * the one-byte field in struct port. */
+            unsigned int ep = p->ep;
+            if (ioctl(fd, USBDEVFS_CLEAR_HALT, &ep) < 0) {
+                p->down = 1;
+                emit_down(p->iface);
+                continue;
+            }
             if (submit(fd, p, s) < 0) {
                 p->down = 1;
                 emit_down(p->iface);

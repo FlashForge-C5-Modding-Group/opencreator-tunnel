@@ -1,8 +1,13 @@
 # Tests for c5_bridge.py; Linux only (uses ptys).  Run: python3 -m pytest
+import errno
+import io
 import os
+import select
+import struct
 import termios
 import threading
 import time
+from unittest import mock
 
 import pytest
 
@@ -196,48 +201,83 @@ def test_reactive_wake_ignores_non_identify_host_frames():
     assert not m.should_wake(5.0)
 
 
-# -- gadget discovery via sysfs layout -------------------------------------
+# -- usbfs gadget and failure handling ------------------------------------
 
-def make_usb_serial(root, name, intf, vid="1d6b", pid="0104"):
-    """Mimic /sys/class/tty/ttyUSBn -> .../1-1/1-1:1.x/ttyUSBn."""
-    dev = root / "devices" / "usb1" / "1-1"
-    port = dev / intf / name
-    port.mkdir(parents=True)
-    (dev / "idVendor").write_text(vid + "\n")
-    (dev / "idProduct").write_text(pid + "\n")
-    tty = root / "class" / name
-    tty.mkdir(parents=True)
-    (tty / "device").symlink_to(port)
-    (tty / "dev").write_text("188:0\n")
-    (root / "dev").mkdir(exist_ok=True)
-    (root / "dev" / name).touch()
-
-
-def test_find_link_matches_gadget_interface(tmp_path):
-    make_usb_serial(tmp_path, "ttyUSB0", "1-1:1.0")
-    make_usb_serial(tmp_path, "ttyUSB1", "1-1:1.1")
-    sysfs, devdir = str(tmp_path / "class"), str(tmp_path / "dev")
-    assert bridge.find_link("1.1", sysfs, devdir) == devdir + "/ttyUSB1"
-    assert bridge.find_link("1.3", sysfs, devdir) is None
+def test_find_gadget_device_matches_device_not_interface(tmp_path,
+                                                          monkeypatch):
+    gadget = tmp_path / "1-1"
+    gadget.mkdir()
+    (gadget / "idVendor").write_text("1d6b\n")
+    (gadget / "idProduct").write_text("0104\n")
+    (gadget / "busnum").write_text("1\n")
+    (gadget / "devnum").write_text("7\n")
+    (tmp_path / "1-1:1.0").mkdir()
+    monkeypatch.setattr(bridge, "SYSFS_USB_DEVICES", str(tmp_path))
+    real_exists = os.path.exists
+    monkeypatch.setattr(bridge.os.path, "exists",
+                        lambda path: path == "/dev/bus/usb/001/007"
+                        or real_exists(path))
+    assert bridge.find_gadget_device() == "/dev/bus/usb/001/007"
+    (gadget / "idVendor").write_text("1a86\n")
+    assert bridge.find_gadget_device() is None
 
 
-def test_find_link_ignores_foreign_usb_device(tmp_path):
-    make_usb_serial(tmp_path, "ttyUSB0", "1-1:1.0", vid="1a86")
-    assert bridge.find_link("1.0", str(tmp_path / "class"),
-                            str(tmp_path / "dev")) is None
+def make_link():
+    link = bridge.UsbSerialLink.__new__(bridge.UsbSerialLink)
+    link.iface = 0
+    link.out_ep = 1
+    link._stop = threading.Event()
+    return link
 
 
-def test_bind_usb_serial_uses_first_available_driver_once(tmp_path):
-    (tmp_path / "vivopay").mkdir()
-    new_id = tmp_path / "vivopay" / "new_id"
-    new_id.write_text("")
-    assert bridge.bind_usb_serial(str(tmp_path)) == "vivopay"
-    assert new_id.read_text() == "1d6b 0104 ff\n"
-    # sysfs lists bound ids as "vid pid"; do not add the id twice
-    new_id.write_text("1d6b 0104\n")
-    assert bridge.bind_usb_serial(str(tmp_path)) == "vivopay"
-    assert new_id.read_text() == "1d6b 0104\n"
+@pytest.mark.parametrize("failure", ["stall", "zero"])
+def test_usb_write_cannot_spin_forever(failure, monkeypatch):
+    device = mock.Mock()
+    device.get_cached.return_value = (9, "usb-node")
+    monkeypatch.setattr(bridge, "GADGET_DEVICE", device)
+    monkeypatch.setattr(bridge, "RETRY_BACKOFF", 0)
+    monkeypatch.setattr(bridge.UsbSerialLink, "MAX_WRITE_RETRIES", 2)
+    monkeypatch.setattr(bridge.fcntl, "ioctl", lambda *args: 0)
+    calls = []
+
+    def transfer(*args, **kwargs):
+        calls.append(1)
+        if failure == "stall":
+            raise OSError(errno.EPIPE, "stalled")
+        return 0
+
+    monkeypatch.setattr(bridge, "usb_bulk_transfer", transfer)
+    with pytest.raises(bridge.LinkDown):
+        make_link().write(b"abc")
+    assert len(calls) == 3
+    device.invalidate.assert_called_once()
 
 
-def test_bind_usb_serial_without_driver(tmp_path):
-    assert bridge.bind_usb_serial(str(tmp_path)) is None
+def test_old_reader_cannot_mark_new_links_down():
+    device = bridge.UsbGadgetDevice()
+    old = mock.Mock()
+    new = mock.Mock()
+    device.links[0] = new
+    data = b"abc"
+    proc = mock.Mock(stdout=io.BytesIO(bytes([0])
+                                       + struct.pack("<I", len(data)) + data))
+    device._reader_proc = proc
+    device._reader_loop(proc, {0: old})
+    old._queue_data.assert_called_once_with(data)
+    old._mark_down.assert_called_once()
+    new._mark_down.assert_not_called()
+    new._queue_data.assert_not_called()
+
+
+def test_usb_reader_notifies_forwarder_without_poll_delay(monkeypatch):
+    device = mock.Mock()
+    monkeypatch.setattr(bridge, "GADGET_DEVICE", device)
+    link = bridge.UsbSerialLink(0)
+    try:
+        link._queue_data(b"klipper")
+        ready, _, _ = select.select([link.wake_fd], [], [], 0)
+        assert ready == [link.wake_fd]
+        assert os.read(link.wake_fd, 1) == b"\x01"
+        assert link.read_nowait() == b"klipper"
+    finally:
+        link.close()

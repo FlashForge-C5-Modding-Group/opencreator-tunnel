@@ -455,20 +455,34 @@ def ensure_urb_reader_binary():
     several attempts -- rather than keep fighting that layer, this one
     small, focused piece is C, reached over a pipe from the rest of this
     (otherwise unchanged, already-working) Python bridge."""
-    if os.path.exists(URB_READER_BIN):
-        return True
+    try:
+        if (os.path.isfile(URB_READER_BIN)
+                and os.access(URB_READER_BIN, os.X_OK)
+                and os.path.getmtime(URB_READER_BIN)
+                >= os.path.getmtime(URB_READER_SRC)):
+            return True
+    except OSError as e:
+        log("usb: cannot stat urb_reader source: %s" % e)
+        return False
     gcc = "/opt/bin/gcc"
     if not os.path.exists(gcc):
         log("usb: urb_reader.c present but no gcc at %s to build it" % gcc)
         return False
     env = dict(os.environ)
     env["PATH"] = "/opt/bin:" + env.get("PATH", "")
+    output = URB_READER_BIN + ".new"
     try:
         subprocess.run([gcc, "-O2", "-I", "/opt/include", "-o",
-                        URB_READER_BIN, URB_READER_SRC],
+                        output, URB_READER_SRC],
                       env=env, check=True,
                       stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        os.chmod(output, 0o755)
+        os.replace(output, URB_READER_BIN)
     except (OSError, subprocess.CalledProcessError) as e:
+        try:
+            os.unlink(output)
+        except OSError:
+            pass
         out = getattr(e, "output", b"")
         log("usb: failed to build urb_reader: %s %s"
            % (e, out.decode(errors="replace") if out else ""))
@@ -583,12 +597,15 @@ class UsbGadgetDevice:
             log("usb: failed to start urb_reader: %s" % e)
             return
         self._reader_proc = proc
+        # The link map changes during reconnects. An old reader must never
+        # deliver to, or mark down, links belonging to a newer generation.
+        links = dict(self.links)
         self._reader_thread = threading.Thread(
-            target=self._reader_loop, args=(proc,), daemon=True)
+            target=self._reader_loop, args=(proc, links), daemon=True)
         self._reader_thread.start()
         log("usb: urb_reader started (pid %d)" % proc.pid)
 
-    def _reader_loop(self, proc):
+    def _reader_loop(self, proc, links):
         """Runs on its own thread for the lifetime of one urb_reader
         subprocess: parses its framed stdout and dispatches each
         completed read to the matching UsbSerialLink's inbound queue. See
@@ -602,24 +619,48 @@ class UsbGadgetDevice:
                 iface = header[0]
                 (length,) = struct.unpack("<I", header[1:])
                 if length == 0xFFFFFFFF:
-                    link = self.links.get(iface)
-                    if link is not None:
-                        link._mark_down()
-                    continue
+                    # This helper cannot attach a replacement link to an
+                    # already-running URB set. Restart all four links now;
+                    # otherwise a single recovered port would silently
+                    # receive nothing until a whole-device reconnect.
+                    log("usb: urb_reader iface %d down; restarting reader"
+                        % iface)
+                    break
+                if iface not in links or length > 4096:
+                    log("usb: invalid urb_reader frame (iface %d, length %d)"
+                        % (iface, length))
+                    break
                 data = _read_exact(stdout, length) if length else b""
                 if data is None:
                     break
-                link = self.links.get(iface)
+                link = links.get(iface)
                 if link is not None and data:
-                    link.inbound.put(data)
+                    link._queue_data(data)
         finally:
+            try:
+                proc.stdin.close()
+            except (OSError, ValueError):
+                pass
+            try:
+                if proc.poll() is None:
+                    proc.terminate()
+            except OSError:
+                pass
+            try:
+                proc.wait(timeout=1.0)
+            except subprocess.TimeoutExpired:
+                try:
+                    proc.kill()
+                except OSError:
+                    pass
+                proc.wait()
             with self._lock:
                 if self._reader_proc is proc:
                     self._reader_proc = None
             # The helper exiting (for any reason -- device gone, killed on
             # a reconnect, crashed) means every port it was serving is
             # down; each PortBridge's own reconnect loop handles the rest.
-            for link in list(self.links.values()):
+            for link in links.values():
                 link._mark_down()
 
     def _close_locked(self):
@@ -687,9 +728,8 @@ class UsbSerialLink:
     which was proven (via A/B/C testing) to starve the camera's USB
     traffic down to ~2fps regardless of the camera's own settings, simply
     by keeping the bus constantly busy with bulk-IN polling even at
-    complete idle. write() is unchanged from the original synchronous
-    USBDEVFS_BULK approach -- it only runs when there's actually data to
-    send, so it was never part of that problem.
+    complete idle. Writes still use synchronous USBDEVFS_BULK only when
+    there is data to send.
     """
     IN_SIZE = 4096
 
@@ -699,10 +739,27 @@ class UsbSerialLink:
         self.inbound = queue.Queue()
         self._stop = threading.Event()
         self._down = threading.Event()
+        self.wake_fd, self._wake_write = os.pipe()
+        os.set_blocking(self.wake_fd, False)
+        os.set_blocking(self._wake_write, False)
         GADGET_DEVICE.register_link(iface, self)
+
+    def _notify(self):
+        try:
+            os.write(self._wake_write, b"\x01")
+        except (BlockingIOError, OSError):
+            # A full pipe is already readable; a closed pipe belongs to a
+            # link that is being torn down.
+            pass
+
+    def _queue_data(self, data):
+        if not self._stop.is_set() and not self._down.is_set():
+            self.inbound.put(data)
+            self._notify()
 
     def _mark_down(self):
         self._down.set()
+        self._notify()
 
     def down(self):
         return self._down.is_set()
@@ -738,7 +795,6 @@ class UsbSerialLink:
                                    struct.pack("<I", self.out_ep))
                     except OSError:
                         pass
-                    continue
                 # EBUSY/EBADF/etc: transient, retry rather than tearing
                 # the shared device down (see _read_loop for why) -- but
                 # only up to a point, so a genuinely stuck device doesn't
@@ -750,13 +806,23 @@ class UsbSerialLink:
                 self._stop.wait(RETRY_BACKOFF)
                 continue
             if n <= 0:
+                retries += 1
+                if retries > self.MAX_WRITE_RETRIES:
+                    GADGET_DEVICE.invalidate()
+                    raise LinkDown("USB bulk write made no progress")
+                self._stop.wait(RETRY_BACKOFF)
                 continue
+            if n > len(chunk):
+                GADGET_DEVICE.invalidate()
+                raise LinkDown("USB bulk write exceeded request length")
             retries = 0
             view = view[n:]
 
     def close(self):
         self._stop.set()
         GADGET_DEVICE.unregister_link(self.iface, self)
+        os.close(self.wake_fd)
+        os.close(self._wake_write)
 
 ######################################################################
 # Per-port bridge
@@ -795,6 +861,17 @@ class PortBridge(threading.Thread):
                     self.forward(link)
             except Exception:
                 self.log("error\n" + traceback.format_exc().rstrip())
+                # A failed UART fd cannot recover by retrying the same
+                # select/read/write loop; reopen and probe it on the next
+                # pass instead of logging the same failure indefinitely.
+                if self.uart is not None:
+                    try:
+                        os.close(self.uart)
+                    except OSError:
+                        pass
+                    self.uart = None
+                    self.probed = False
+                    self.monitor = WakeMonitor()
                 self.stop.wait(2.0)
 
     def open_uart(self):
@@ -853,23 +930,27 @@ class PortBridge(threading.Thread):
         host_frames = FrameDetector()
         mcu_frames = FrameDetector()
         monitor = self.monitor
-        select_timeout = 0.001 if self.baud >= 460800 else 0.002
         while not self.stop.is_set():
             if link.down():
                 raise LinkDown("read thread stopped")
-            # usbfs bulk I/O has no select()-able fd; poll the reader
-            # thread's queue instead of blocking on it.
-            data = link.read_nowait()
-            if data:
-                now = time.monotonic()
-                to_uart += data
-                for frame in host_frames.feed(data):
-                    monitor.host_frame(frame, now)
-
             rlist = [uart] if len(to_link) < MAX_PENDING else []
+            if len(to_uart) < MAX_PENDING:
+                rlist.append(link.wake_fd)
             wlist = [uart] if to_uart else []
-            r, w, _ = select.select(rlist, wlist, [], select_timeout)
+            # The reader thread signals this pipe on each completed URB.
+            # USB->UART forwarding no longer waits for a 1-2ms poll tick.
+            r, w, _ = select.select(rlist, wlist, [], 0.05)
             now = time.monotonic()
+            if link.wake_fd in r:
+                try:
+                    os.read(link.wake_fd, 1)
+                except BlockingIOError:
+                    pass
+                data = link.read_nowait()
+                if data:
+                    to_uart += data
+                    for frame in host_frames.feed(data):
+                        monitor.host_frame(frame, now)
             if uart in r:
                 try:
                     data = os.read(uart, 4096)

@@ -17,6 +17,8 @@ cd "$(dirname "$0")"
 [ -f "$TARGET" ] || die "$TARGET not found"
 [ -f c5_bridge.py ] && [ -f firmwareExe ] || die "c5_bridge.py/firmwareExe missing in $DIR"
 "$PYTHON" -c 'import termios, select' || die "$PYTHON does not run"
+"$PYTHON" -c 'import c5_bridge, sys; sys.exit(0 if c5_bridge.ensure_urb_reader_binary() else 1)' \
+    || die "could not build the USB URB reader; check /opt/bin/gcc and /opt/include"
 
 if is_elf "$TARGET"; then
     if [ -e firmwareExe.stock ]; then
