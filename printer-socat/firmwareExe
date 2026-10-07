@@ -1,0 +1,36 @@
+#!/bin/sh
+# Opt-in socat launcher. The original launcher is saved as
+# /usr/prog/c5-tunnel-socat/firmwareExe.previous for one-command rollback.
+export LD_LIBRARY_PATH=/usr/prog/Python-3.8.2/lib:/usr/prog/openssl-1.0.2d/lib:/usr/prog/libffi-3.4.4/lib:$LD_LIBRARY_PATH
+
+cmd_mcu write_firmware /usr/prog/libmcu-bare.bin
+cmd_mcu bootup
+sleep 2
+
+WPA_CONF=/usr/prog/wifi/wpa_supplicant.conf
+wifi_check() {
+    [ -e /sys/class/net/wlan0 ] || return
+    grep -q 'network=' "$WPA_CONF" 2>/dev/null || return
+    index=$(cat /sys/class/net/wlan0/ifindex 2>/dev/null)
+    if [ "$index" != "$wifi_index" ]; then
+        killall wpa_supplicant udhcpc >/dev/null 2>&1
+        sleep 1
+        wifi_index=$index
+    fi
+    pidof wpa_supplicant >/dev/null 2>&1 || \
+        wpa_supplicant -Dnl80211 -iwlan0 -c"$WPA_CONF" -B
+    pidof udhcpc >/dev/null 2>&1 || udhcpc -i wlan0 -b >/dev/null 2>&1
+}
+wifi_index=$(cat /sys/class/net/wlan0/ifindex 2>/dev/null)
+pidof wpa_supplicant >/dev/null 2>&1 || wifi_index=
+(
+    while true; do
+        wifi_check
+        sleep 10
+    done
+) &
+
+while true; do
+    /usr/prog/Python-3.8.2/bin/python3 /usr/prog/c5-tunnel-socat/c5_socat.py
+    sleep 3
+done
