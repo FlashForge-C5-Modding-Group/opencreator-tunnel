@@ -4,6 +4,9 @@ set -e
 DIR=/usr/prog/c5-tunnel-socat
 TARGET=/usr/prog/PROGRAM/software/firmwareExe
 PYTHON=/usr/prog/Python-3.8.2/bin/python3
+# An SSH shell does not inherit the library path set by the installed
+# firmwareExe launcher. Use the same runtime paths for installer preflight.
+export LD_LIBRARY_PATH=/usr/prog/Python-3.8.2/lib:/usr/prog/openssl-1.0.2d/lib:/usr/prog/libffi-3.4.4/lib:${LD_LIBRARY_PATH:-}
 die() { echo "socat install: $*" >&2; exit 1; }
 
 cd "$(dirname "$0")"

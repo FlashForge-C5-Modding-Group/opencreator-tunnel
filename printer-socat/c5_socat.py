@@ -7,6 +7,7 @@ before changing UART parity or sending the stock boot-stage wake sequence.
 GPL-3.0-or-later.
 """
 import os
+import errno
 import re
 import select
 import signal
@@ -17,6 +18,7 @@ import tempfile
 import termios
 import threading
 import time
+import traceback
 
 PORTS = (
     ("mainboardgd", "/dev/ttyS2", 230400, (), "1.0"),
@@ -50,6 +52,16 @@ def log(port, message):
 
 def bind_usb_serial():
     gadget_id = "1d6b 0104"
+    # new_id is a registration endpoint, not a reliable list of IDs already
+    # registered. A launcher restart must reuse the driver that owns the
+    # gadget instead of attempting to register the same ID again.
+    existing = find_link("1.0")
+    if existing is not None:
+        driver_path = os.path.realpath(
+            "/sys/class/tty/%s/device/driver" % os.path.basename(existing))
+        driver = os.path.basename(driver_path)
+        if driver in DRIVERS:
+            return driver
     for name in DRIVERS:
         new_id = "/sys/bus/usb-serial/drivers/%s/new_id" % name
         if not os.path.exists(new_id):
@@ -62,6 +74,8 @@ def bind_usb_serial():
                 f.write(gadget_id + " ff\n")
             return name
         except OSError as e:
+            if e.errno == errno.EEXIST:
+                return name
             log("usb", "%s binding failed: %s" % (name, e))
     return None
 
@@ -377,4 +391,11 @@ def main():
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except Exception:
+        # The stock launcher has no persistent stderr capture. Keep startup
+        # failures in the same file as the normal supervisor diagnostics.
+        with open(LOG_PATH, "a") as failure_log:
+            traceback.print_exc(file=failure_log)
+        raise

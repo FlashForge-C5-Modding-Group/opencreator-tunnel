@@ -7,8 +7,19 @@ import subprocess
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 import c5_socat
+
+
+class GadgetBindingTest(unittest.TestCase):
+    def test_reuses_already_bound_gadget_driver(self):
+        with mock.patch.object(c5_socat, "find_link", return_value="/dev/ttyUSB0"), \
+                mock.patch.object(c5_socat.os.path, "realpath",
+                           return_value="/sys/bus/usb-serial/drivers/flashloader"), \
+                mock.patch.object(c5_socat.os.path, "exists",
+                           side_effect=AssertionError("unexpected registration")):
+            self.assertEqual(c5_socat.bind_usb_serial(), "flashloader")
 
 
 class IdentifyMonitorTest(unittest.TestCase):
