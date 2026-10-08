@@ -46,8 +46,13 @@ def log(port, message):
         if LOG_FILE is not None:
             LOG_FILE.write(line)
             LOG_FILE.flush()
-        sys.stderr.write(line)
-        sys.stderr.flush()
+        # firmwareExe may inherit /dev/console as stderr. On the printer that
+        # device can return EIO after boot; file logging must still continue.
+        try:
+            sys.stderr.write(line)
+            sys.stderr.flush()
+        except OSError:
+            pass
 
 
 def bind_usb_serial():
@@ -309,8 +314,10 @@ def run_port(port, uart, baud, parity_order, iface):
                         raise RuntimeError("identify monitor did not start")
                     socat = subprocess.Popen([
                         SOCAT, "-b4096", "-r", host_fifo, "-R", mcu_fifo,
-                        "FILE:%s,rawer,echo=0,b115200" % link,
-                        "FILE:%s,rawer,echo=0,b%d" % (uart, baud)],
+                        # Match the working Python bridge's CLOCAL/CREAD and
+                        # disabled hardware flow control on both serial fds.
+                        "FILE:%s,rawer,echo=0,clocal=1,cread=1,crtscts=0,b115200" % link,
+                        "FILE:%s,rawer,echo=0,clocal=1,cread=1,crtscts=0,b%d" % (uart, baud)],
                         stdout=subprocess.DEVNULL,
                         stderr=LOG_FILE)
                     log(port, "socat started pid %d" % socat.pid)

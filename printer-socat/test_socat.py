@@ -1,5 +1,6 @@
 """Host-side tests. Run on Linux: python3 -m unittest -v test_socat."""
 import os
+import io
 import pty
 import select
 import shutil
@@ -20,6 +21,18 @@ class GadgetBindingTest(unittest.TestCase):
                 mock.patch.object(c5_socat.os.path, "exists",
                            side_effect=AssertionError("unexpected registration")):
             self.assertEqual(c5_socat.bind_usb_serial(), "flashloader")
+
+    def test_log_survives_broken_console_stderr(self):
+        original_log_file = c5_socat.LOG_FILE
+        destination = io.StringIO()
+        try:
+            c5_socat.LOG_FILE = destination
+            with mock.patch.object(c5_socat.sys.stderr, "write",
+                                   side_effect=OSError(5, "Input/output error")):
+                c5_socat.log("supervisor", "still running")
+            self.assertIn("supervisor: still running", destination.getvalue())
+        finally:
+            c5_socat.LOG_FILE = original_log_file
 
 
 class IdentifyMonitorTest(unittest.TestCase):
