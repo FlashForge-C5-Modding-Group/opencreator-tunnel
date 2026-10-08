@@ -32,5 +32,6 @@ pidof wpa_supplicant >/dev/null 2>&1 || wifi_index=
 
 while true; do
     /usr/prog/Python-3.8.2/bin/python3 /usr/prog/c5-tunnel-socat/c5_socat.py
+    /usr/prog/scripts/scripts/camera.sh
     sleep 3
 done
