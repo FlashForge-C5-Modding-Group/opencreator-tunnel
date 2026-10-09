@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 # Creator 5 MCU tunnel: forward the printer's four MCU UARTs to an SBC over
-# USB. The SBC runs a four-port "gser" serial gadget (two endpoints per port,
-# so four ports fit the Pi's dwc2 controller); this side binds it to a
-# built-in usb-serial driver and sees one ttyUSB per gadget interface.
+# USB. The SBC runs a five-port "gser" serial gadget (two endpoints per
+# port; five ports still fit the Pi's dwc2 controller -- tested on real
+# hardware): four for the MCUs, one (interface 1.4) for the beep control
+# channel (see BeepServer below). This side binds it to a built-in
+# usb-serial driver and sees one ttyUSB per gadget interface.
 #
 # Runs on the printer SoC with its bundled Python 3.8, stdlib only.
 #
@@ -42,6 +44,18 @@ LOG = "/usr/data/logs/c5-tunnel.log"
 SYSFS_TTY = "/sys/class/tty"
 SYSFS_USB_SERIAL = "/sys/bus/usb-serial/drivers"
 DEV_DIR = "/dev"
+# Host PWM buzzer, forwarded over the gadget's 5th serial port
+# (interface 1.4) instead of the network, so it keeps working with no
+# Wi-Fi/LAN on the printer. Klipper on the SBC has no local cmd_pwm, so
+# creator5_remote_beeper.py (klippy/extras) sends one line here instead
+# of the no-op the SBC would otherwise need; this mirrors
+# creator5_beeper.py's own PWM programming sequence for printers that
+# still run Klipper on the SoC directly.
+BEEP_IFACE = "1.4"
+BEEP_BAUD = 115200
+BEEP_COMMAND = "cmd_pwm"
+BEEP_CHANNEL = "pc12"
+BEEP_ACCEPT_POLL = 1.0       # s, so the listener notices `stop` promptly
 
 ######################################################################
 # Logging
@@ -591,6 +605,152 @@ class PortBridge(threading.Thread):
 ######################################################################
 
 
+######################################################################
+# Host PWM buzzer (remote C5_BUZZER)
+######################################################################
+
+def _run_pwm(*args, tolerate_already_working=False):
+    try:
+        result = subprocess.run([BEEP_COMMAND] + list(args),
+                                stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE,
+                                check=False, timeout=3)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise RuntimeError("%s failed: %s" % (BEEP_COMMAND, exc))
+    if result.returncode:
+        detail = result.stderr.decode("utf-8", "replace").strip()
+        # The kernel PWM driver rejects config/set_level/set_prescale
+        # with this exact error once the channel is already in its
+        # "working" state ("pwm ch N Cannot configure at working" in
+        # dmesg) -- including right after *this process* restarts,
+        # since that state lives in the kernel, not here. There is no
+        # way to query or release it (disable_channels does not), so
+        # tolerate it on those three calls: it means the one-time setup
+        # already happened, not that something is actually wrong.
+        if tolerate_already_working and "operation not permitted" in detail.lower():
+            return
+        raise RuntimeError("%s failed (%d): %s"
+                           % (BEEP_COMMAND, result.returncode, detail))
+
+
+_pwm_configured = set()
+
+
+def play_tone(duration_ms, frequency, level, channel=BEEP_CHANNEL):
+    # Same waveform math and sequencing as creator5_beeper.py's
+    # _play_tone, just run synchronously in this thread instead of via
+    # Klipper's reactor/aio_executor.
+    # set_level/set_prescale are only ever called here with fixed
+    # constants (100, 6), never derived from the tone's own parameters,
+    # so they are one-time setup alongside config; only set_wc (the
+    # actual waveform) and enable/disable_channels vary per beep. Call
+    # them at most once per channel per process lifetime, not on every
+    # beep: the kernel soc_pwm driver serializes config/set_level/
+    # set_prescale/enable/disable on one internal mutex, and real
+    # hardware testing showed that calling config repeatedly (even
+    # just to hit its expected "already configured" failure) risks a
+    # cmd_pwm process getting stuck forever in kernel D state waiting
+    # on that mutex ("task cmd_pwm ... blocked for more than N
+    # seconds" in dmesg) -- a genuine kernel deadlock only a reboot
+    # clears, not something retryable in userspace.
+    period = max(2, int(round(50000000. / frequency)))
+    high = period * level // 200
+    if channel not in _pwm_configured:
+        _run_pwm("config", channel, "freq=50000000", "max_level=300",
+                 "active_level=1", "accuracy_priority=freq",
+                 tolerate_already_working=True)
+        _run_pwm("set_level", channel, "100", tolerate_already_working=True)
+        _run_pwm("set_prescale", channel, "6", tolerate_already_working=True)
+        _pwm_configured.add(channel)
+    try:
+        _run_pwm("set_wc", channel, str(period), str(high))
+        _run_pwm("enable_channels", channel)
+        time.sleep(duration_ms / 1000.)
+    finally:
+        try:
+            _run_pwm("set_wc", channel, "1", "0")
+        finally:
+            _run_pwm("disable_channels", channel)
+
+
+class BeepServer(threading.Thread):
+    # One line in, one line out, over the gadget's 5th serial port
+    # (ttyUSB4 here / ttyGS4 on the SBC, USB interface 1.4) instead of
+    # the network, so C5_BUZZER works even with no Wi-Fi/LAN on the
+    # printer: "BEEP DURATION=5000 FREQUENCY=2500 LEVEL=100" -> "OK" or
+    # "ERROR <message>". Needs a usb-serial-bound gadget (see
+    # bind_usb_serial); on a kernel with no usb-serial driver this
+    # link just never comes up, same as everything else over the
+    # tunnel being unreachable without Wi-Fi today -- not a new
+    # failure mode.
+    def __init__(self, stop):
+        threading.Thread.__init__(self, name="beep", daemon=True)
+        self.stop = stop
+        self.fd = None
+
+    def run(self):
+        buf = b""
+        while not self.stop.is_set():
+            if self.fd is None:
+                node = find_link(BEEP_IFACE)
+                if node is None:
+                    self.stop.wait(BEEP_ACCEPT_POLL)
+                    continue
+                try:
+                    self.fd = open_tty(node, BEEP_BAUD)
+                    log("beep: link up %s" % (node,))
+                except OSError as exc:
+                    log("beep: cannot open %s: %s" % (node, exc))
+                    self.stop.wait(BEEP_ACCEPT_POLL)
+                    continue
+                buf = b""
+            try:
+                chunk = read_ready(self.fd, BEEP_ACCEPT_POLL)
+            except OSError as exc:
+                log("beep: link error, reopening: %s" % (exc,))
+                os.close(self.fd)
+                self.fd = None
+                continue
+            if not chunk:
+                continue
+            buf += chunk
+            while b"\n" in buf:
+                line, buf = buf.split(b"\n", 1)
+                try:
+                    reply = self._handle(line)
+                except Exception:
+                    log("beep: handler error:\n" + traceback.format_exc())
+                    reply = b"ERROR internal error\n"
+                try:
+                    write_all(self.fd, reply)
+                except (OSError, TimeoutError) as exc:
+                    log("beep: reply write failed: %s" % (exc,))
+        if self.fd is not None:
+            os.close(self.fd)
+
+    def _handle(self, line):
+        text = line.decode("utf-8", "replace").strip()
+        parts = text.split()
+        if not parts or parts[0] != "BEEP":
+            return b"ERROR unknown command\n"
+        params = {}
+        for part in parts[1:]:
+            if "=" in part:
+                key, _, value = part.partition("=")
+                params[key.upper()] = value
+        try:
+            duration_ms = int(params.get("DURATION", "5000"))
+            frequency = int(params.get("FREQUENCY", "2500"))
+            level = int(params.get("LEVEL", "100"))
+        except ValueError:
+            return b"ERROR invalid parameter\n"
+        try:
+            play_tone(duration_ms, frequency, level)
+        except RuntimeError as exc:
+            return ("ERROR %s\n" % (exc,)).encode("utf-8", "replace")
+        return b"OK\n"
+
+
 def set_priority():
     try:
         os.sched_setscheduler(0, os.SCHED_FIFO, os.sched_param(50))
@@ -620,12 +780,15 @@ def main():
     signal.signal(signal.SIGTERM, on_signal)
     signal.signal(signal.SIGINT, on_signal)
     bridges = [PortBridge(stop, *p) for p in PORTS]
+    beep_server = BeepServer(stop)
     for b in bridges:
         b.start()
+    beep_server.start()
     while not stop.wait(1.0):
         pass
     for b in bridges:
         b.join(5.0)
+    beep_server.join(5.0)
     log("c5-tunnel bridge stopped")
     return 0
 

@@ -34,6 +34,12 @@ previous launcher as `firmwareExe.previous`. The new launcher retains the
 existing coprocessor and Wi-Fi initialization. Logs go to
 `/usr/data/logs/c5-socat.log`.
 
+The installer uses the printer Python library path for its syntax check. A
+custom launcher must not put a foreground touchscreen or other long-running
+program before the supervisor loop. If it starts GrumpyScreen there, run it
+in the background so the MCU relays can start. Keep a copy of the customized
+launcher before changing it.
+
 To roll back to the exact previous launcher:
 
 ```sh
@@ -55,6 +61,13 @@ exclusive ownership of the same UARTs and gadget ports. The existing
    peak `socat`, `identify_monitor`, and supervisor usage on the printer SoC.
    Compare Klipper `srtt`, retransmits, and print stalls as well. Do not infer
    improvement from idle CPU alone.
+
+An installed relay can be running while the Pi still reports MCU timeouts.
+The gadget serial ports need local-carrier mode (`clocal`) and disabled
+hardware flow control on both ends. Check the Pi's Klipper state after a
+`FIRMWARE_RESTART`; four socat processes alone do not prove bidirectional
+communication. The supervisor logs to the file even if its inherited console
+stderr is unavailable.
 
 Host-side tests (Linux, no printer required):
 

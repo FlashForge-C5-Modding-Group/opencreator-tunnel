@@ -12,8 +12,8 @@ runs Klipper from the same repository (branch `c5`).
 
 ```
 SBC (Klipper, Moonraker, Mainsail)
-  /dev/ttyGS0..3  --USB gadget, 4x gser serial-->  printer /dev/ttyUSB*
-                                                   c5_bridge.py
+  /dev/ttyGS0..3  --USB gadget, 4x gser serial-->  printer usbfs bulk endpoints
+                                                   c5_bridge.py + urb_reader
                                                      ttyS2  mainBoardGD  230400
                                                      ttyS4  heaterBoard  230400
                                                      ttyS5  eBoard       460800
