@@ -4,5 +4,5 @@ After=network-online.target
 
 [Service]
 Type=oneshot
-User=cart
-ExecStart=/usr/bin/python3 /home/cart/opencreator-tunnel/pi/opencreator-updater/update.py
+User=__OC_USER__
+ExecStart=/usr/bin/python3 __OC_HOME__/opencreator-tunnel/pi/opencreator-updater/update.py

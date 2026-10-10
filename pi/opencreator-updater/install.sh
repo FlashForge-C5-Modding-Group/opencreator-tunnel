@@ -11,7 +11,17 @@ set -eu
 HERE=$(cd "$(dirname "$0")" && pwd)
 ASVC="$HOME/printer_data/moonraker.asvc"
 
-sudo cp "$HERE/opencreator-updater.service" /etc/systemd/system/opencreator-updater.service
+# Service file templating: plain systemd units can't expand shell
+# variables in User=/ExecStart=, so substitute the actual invoking
+# user (not root -- this script only elevates for the two steps that
+# need it) and their home directory into placeholders before install.
+OC_USER="${SUDO_USER:-$(whoami)}"
+OC_HOME=$(eval echo "~$OC_USER")
+TMP_SERVICE=$(mktemp)
+sed "s|__OC_USER__|$OC_USER|g; s|__OC_HOME__|$OC_HOME|g" \
+    "$HERE/opencreator-updater.service" >"$TMP_SERVICE"
+sudo cp "$TMP_SERVICE" /etc/systemd/system/opencreator-updater.service
+rm -f "$TMP_SERVICE"
 sudo systemctl daemon-reload
 
 if [ -f "$ASVC" ] && ! grep -qx "opencreator-updater" "$ASVC"; then
