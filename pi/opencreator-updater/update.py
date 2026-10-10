@@ -9,9 +9,11 @@ How it stays non-destructive: every managed config file has a tracked
 ran successfully. Each run does a real three-way merge (git merge-file)
 of (live file, base snapshot, new template) for every file: lines the
 template changed get applied, lines the user changed independently are
-left alone, and only a genuine overlapping edit raises a conflict --
-which is written into the live file as normal conflict markers and left
-for a human to resolve, never silently guessed at.
+left alone, and only a genuine overlapping edit raises a conflict. The
+live file is never touched when that happens -- the attempted merge
+(with conflict markers) is written to a sibling "<file>.conflict" file
+instead, for a human to resolve and copy over by hand. Conflict markers
+must never land in a config Klipper is actively reading.
 
 First run has no base snapshot yet, so there is nothing to diff the
 template against: it seeds the base from the current template and
@@ -49,6 +51,10 @@ def log(msg):
     print(msg, flush=True)
 
 
+def _normalize_newlines(src, dest):
+    dest.write_bytes(src.read_bytes().replace(b"\r\n", b"\n"))
+
+
 def merge_one(name, live_path, base_path, template_path):
     """Three-way merge template_path's changes into live_path, using
     base_path as the common ancestor. Returns 'unchanged', 'merged',
@@ -61,26 +67,50 @@ def merge_one(name, live_path, base_path, template_path):
         return "bootstrap"
     if base_path.read_bytes() == template_path.read_bytes():
         return "unchanged"
-    # git merge-file edits its first argument in place; work on a copy
-    # so a conflict never leaves the live file half-written.
+    # Normalize line endings before diffing. A live file that picked up
+    # CRLF endings at some point (editing on Windows, an earlier scp,
+    # whatever) would otherwise differ from the LF-only base/template
+    # on every single line -- git merge-file then finds no common
+    # anchor points at all and conflicts the *entire* file (this
+    # actually happened once in production: a trivial one-line
+    # template change turned into an 800-line whole-file conflict that
+    # got written over a live config and halted Klipper). Klipper's own
+    # config parser doesn't care about line endings, so merging and
+    # writing the result back as LF-only is safe and keeps every future
+    # base snapshot consistently LF too.
     work = live_path.with_suffix(live_path.suffix + ".oc-merge-tmp")
-    shutil.copy2(live_path, work)
-    result = subprocess.run(
-        ["git", "merge-file", "-L", "current", "-L", "base", "-L", "latest",
-         str(work), str(base_path), str(template_path)],
-        capture_output=True)
-    if result.returncode == 0:
-        shutil.move(str(work), str(live_path))
-        return "merged"
-    if result.returncode > 0:
-        # Conflict markers are now in `work`; surface them in the live
-        # file itself rather than guessing which side wins.
-        shutil.move(str(work), str(live_path))
-        return "conflict"
-    log("%s: git merge-file failed outright: %s"
-        % (name, result.stderr.decode("utf-8", "replace")))
-    work.unlink(missing_ok=True)
-    return "error"
+    norm_base = base_path.with_suffix(base_path.suffix + ".oc-merge-base")
+    norm_latest = template_path.with_suffix(
+        template_path.suffix + ".oc-merge-latest")
+    try:
+        _normalize_newlines(live_path, work)
+        _normalize_newlines(base_path, norm_base)
+        _normalize_newlines(template_path, norm_latest)
+        result = subprocess.run(
+            ["git", "merge-file", "-L", "current", "-L", "base", "-L", "latest",
+             str(work), str(norm_base), str(norm_latest)],
+            capture_output=True)
+        if result.returncode == 0:
+            shutil.move(str(work), str(live_path))
+            return "merged"
+        if result.returncode > 0:
+            # A real conflict: the template changed a line the live
+            # file also changed. Never write conflict markers into the
+            # live file itself -- that would corrupt a config Klipper
+            # is actively reading (which is exactly what happened
+            # before this safeguard existed). Leave live_path
+            # completely untouched and write the attempted merge
+            # (conflict markers and all) to a sibling .conflict file
+            # for a human to resolve and copy over by hand.
+            conflict_path = live_path.with_suffix(live_path.suffix + ".conflict")
+            shutil.move(str(work), str(conflict_path))
+            return "conflict"
+        log("%s: git merge-file failed outright: %s"
+            % (name, result.stderr.decode("utf-8", "replace")))
+        return "error"
+    finally:
+        for tmp in (work, norm_base, norm_latest):
+            tmp.unlink(missing_ok=True)
 
 
 def sync_configs():
@@ -143,8 +173,9 @@ def main():
     if conflicts:
         log("")
         log("CONFLICTS in: %s" % (", ".join(conflicts),))
-        log("Resolve the <<<<<<< current / ======= / >>>>>>> latest "
-            "markers in those files by hand, then restart Klipper.")
+        log("The live files were left untouched. Review the <<<<<<< current / "
+            "======= / >>>>>>> latest markers in each <file>.conflict next to "
+            "it, then copy over by hand whatever you want to keep.")
         return 1
     if config_changed or klipper_changed:
         restart_klipper()
