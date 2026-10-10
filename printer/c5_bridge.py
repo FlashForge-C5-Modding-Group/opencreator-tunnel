@@ -14,6 +14,7 @@ import re
 import os
 import select
 import signal
+import socket
 import stat
 import subprocess
 import sys
@@ -56,6 +57,11 @@ BEEP_BAUD = 115200
 BEEP_COMMAND = "cmd_pwm"
 BEEP_CHANNEL = "pc12"
 BEEP_ACCEPT_POLL = 1.0       # s, so the listener notices `stop` promptly
+# Wi-Fi/LAN fallback for C5_BUZZER when the gadget's 5th serial port isn't
+# present (board pinned to 4 tunnel ports). Same one-line-in/one-line-out
+# protocol as BeepServer, just over TCP; the SBC side only uses this when
+# network_host is set in [creator5_remote_beeper].
+BEEP_NET_PORT = 8411
 
 ######################################################################
 # Logging
@@ -717,7 +723,7 @@ class BeepServer(threading.Thread):
             while b"\n" in buf:
                 line, buf = buf.split(b"\n", 1)
                 try:
-                    reply = self._handle(line)
+                    reply = _handle_beep_line(line)
                 except Exception:
                     log("beep: handler error:\n" + traceback.format_exc())
                     reply = b"ERROR internal error\n"
@@ -728,27 +734,80 @@ class BeepServer(threading.Thread):
         if self.fd is not None:
             os.close(self.fd)
 
-    def _handle(self, line):
-        text = line.decode("utf-8", "replace").strip()
-        parts = text.split()
-        if not parts or parts[0] != "BEEP":
-            return b"ERROR unknown command\n"
-        params = {}
-        for part in parts[1:]:
-            if "=" in part:
-                key, _, value = part.partition("=")
-                params[key.upper()] = value
+
+def _handle_beep_line(line):
+    text = line.decode("utf-8", "replace").strip()
+    parts = text.split()
+    if not parts or parts[0] != "BEEP":
+        return b"ERROR unknown command\n"
+    params = {}
+    for part in parts[1:]:
+        if "=" in part:
+            key, _, value = part.partition("=")
+            params[key.upper()] = value
+    try:
+        duration_ms = int(params.get("DURATION", "5000"))
+        frequency = int(params.get("FREQUENCY", "2500"))
+        level = int(params.get("LEVEL", "100"))
+    except ValueError:
+        return b"ERROR invalid parameter\n"
+    try:
+        play_tone(duration_ms, frequency, level)
+    except RuntimeError as exc:
+        return ("ERROR %s\n" % (exc,)).encode("utf-8", "replace")
+    return b"OK\n"
+
+
+class BeepNetworkServer(threading.Thread):
+    def __init__(self, stop, port=BEEP_NET_PORT):
+        threading.Thread.__init__(self, name="beep-net", daemon=True)
+        self.stop = stop
+        self.port = port
+
+    def run(self):
         try:
-            duration_ms = int(params.get("DURATION", "5000"))
-            frequency = int(params.get("FREQUENCY", "2500"))
-            level = int(params.get("LEVEL", "100"))
-        except ValueError:
-            return b"ERROR invalid parameter\n"
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            sock.bind(("0.0.0.0", self.port))
+            sock.listen(4)
+            sock.settimeout(1.0)
+        except OSError as exc:
+            log("beep-net: cannot bind port %d: %s" % (self.port, exc))
+            return
+        log("beep-net: listening on %d" % (self.port,))
         try:
-            play_tone(duration_ms, frequency, level)
-        except RuntimeError as exc:
-            return ("ERROR %s\n" % (exc,)).encode("utf-8", "replace")
-        return b"OK\n"
+            while not self.stop.is_set():
+                try:
+                    conn, addr = sock.accept()
+                except socket.timeout:
+                    continue
+                except OSError as exc:
+                    log("beep-net: accept error: %s" % (exc,))
+                    continue
+                try:
+                    conn.settimeout(4.0)
+                    buf = b""
+                    while b"\n" not in buf and len(buf) < 256:
+                        chunk = conn.recv(256)
+                        if not chunk:
+                            break
+                        buf += chunk
+                    line = buf.split(b"\n", 1)[0]
+                    log("beep-net: rx %r from %s" % (line, addr))
+                    try:
+                        reply = _handle_beep_line(line)
+                    except Exception:
+                        log("beep-net: handler error:\n"
+                            + traceback.format_exc())
+                        reply = b"ERROR internal error\n"
+                    try:
+                        conn.sendall(reply)
+                    except OSError as exc:
+                        log("beep-net: reply send failed: %s" % (exc,))
+                finally:
+                    conn.close()
+        finally:
+            sock.close()
 
 
 def set_priority():
@@ -781,14 +840,17 @@ def main():
     signal.signal(signal.SIGINT, on_signal)
     bridges = [PortBridge(stop, *p) for p in PORTS]
     beep_server = BeepServer(stop)
+    beep_net_server = BeepNetworkServer(stop)
     for b in bridges:
         b.start()
     beep_server.start()
+    beep_net_server.start()
     while not stop.wait(1.0):
         pass
     for b in bridges:
         b.join(5.0)
     beep_server.join(5.0)
+    beep_net_server.join(5.0)
     log("c5-tunnel bridge stopped")
     return 0
 

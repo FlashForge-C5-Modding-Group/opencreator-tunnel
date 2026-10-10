@@ -11,6 +11,7 @@ import errno
 import re
 import select
 import signal
+import socket
 import stat
 import subprocess
 import sys
@@ -48,6 +49,12 @@ BEEP_BAUD = 115200
 BEEP_COMMAND = "cmd_pwm"
 BEEP_CHANNEL = "pc12"
 BEEP_ACCEPT_POLL = 1.0
+# Wi-Fi/LAN fallback for C5_BUZZER when the gadget's 5th serial port isn't
+# present (board pinned to 4 tunnel ports -- see pi/c5-tunnel-gadget.sh).
+# Same one-line-in/one-line-out protocol as run_beep_server, just over TCP;
+# the SBC side only uses this when network_host is set in
+# [creator5_remote_beeper] (klippy/extras/creator5_remote_beeper.py).
+BEEP_NET_PORT = 8411
 
 
 def log(port, message):
@@ -532,6 +539,53 @@ def _handle_beep_line(line):
     return b"OK\n"
 
 
+def run_beep_network_server(port=BEEP_NET_PORT):
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind(("0.0.0.0", port))
+        sock.listen(4)
+        sock.settimeout(1.0)
+    except OSError as exc:
+        log("beep-net", "cannot bind port %d: %s" % (port, exc))
+        return
+    log("beep-net", "listening on %d" % (port,))
+    try:
+        while not STOP.is_set():
+            try:
+                conn, addr = sock.accept()
+            except socket.timeout:
+                continue
+            except OSError as exc:
+                log("beep-net", "accept error: %s" % (exc,))
+                continue
+            try:
+                conn.settimeout(4.0)
+                buf = b""
+                while b"\n" not in buf and len(buf) < 256:
+                    chunk = conn.recv(256)
+                    if not chunk:
+                        break
+                    buf += chunk
+                line = buf.split(b"\n", 1)[0]
+                log("beep-net", "rx %r from %s" % (line, addr))
+                try:
+                    reply = _handle_beep_line(line)
+                except Exception:
+                    log("beep-net", "handler error:\n" + traceback.format_exc())
+                    reply = b"ERROR internal error\n"
+                try:
+                    conn.sendall(reply)
+                except OSError as exc:
+                    log("beep-net", "reply send failed: %s" % (exc,))
+            finally:
+                conn.close()
+    except Exception:
+        log("beep-net", "thread crashed:\n" + traceback.format_exc())
+    finally:
+        sock.close()
+
+
 def set_priority():
     try:
         os.sched_setscheduler(0, os.SCHED_FIFO, os.sched_param(50))
@@ -569,14 +623,18 @@ def main():
                for port in PORTS]
     beep_thread = threading.Thread(target=run_beep_server, name="beep",
                                    daemon=True)
+    beep_net_thread = threading.Thread(target=run_beep_network_server,
+                                       name="beep-net", daemon=True)
     for thread in threads:
         thread.start()
     beep_thread.start()
+    beep_net_thread.start()
     while not STOP.wait(1.0):
         pass
     for thread in threads:
         thread.join(4.0)
     beep_thread.join(4.0)
+    beep_net_thread.join(4.0)
     log("supervisor", "stopped")
     return 0
 
