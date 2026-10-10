@@ -1,0 +1,8 @@
+[Unit]
+Description=OpenCreator Updater (sync printer_data/config and pull Klipper)
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=cart
+ExecStart=/usr/bin/python3 /home/cart/opencreator-tunnel/pi/opencreator-updater/update.py
