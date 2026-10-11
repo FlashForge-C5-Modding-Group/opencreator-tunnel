@@ -25,3 +25,22 @@ second pass on each axis. `safe_z_home` also makes a 10 mm clearance hop at
 3 mm/s before an unhomed move, which takes several seconds. The homing
 start delay in Kalico is only 1 ms. No homing speed or clearance was changed
 here because those movements protect the attached tool and nozzle.
+
+## MPC hotend control
+
+Also copy `pi/kalico/printer.kalico_mpc.cfg` into `~/printer_data/config/`.
+It switches `[extruder]`–`[extruder3]` to `control: mpc` (`heater_power: 50`)
+and is picked up by
+`[include printer.kalico_mpc*.cfg]` (a no-op on stock Klipper, where the file
+must not be installed). Then:
+
+1. In the `SAVE_CONFIG` block of `printer.cfg`, delete the `control = pid`
+   line under each of `[extruder]`–`[extruder3]`, since saved values override
+   included files.
+2. Restart and run `C5_MPC_CALIBRATE` (or `C5_MPC_CALIBRATE TOOL=n`).
+
+`printer.mpc.cfg` (in the normal config tree) adds MPC-aware `M109`/`M190`,
+`_SET_MPC_MATERIAL`, and `MATERIAL=`/`MATERIAL0..3=` support in
+`C5_PRINT_START`. All of it checks for Kalico and `control: mpc` at runtime
+and falls back to stock behaviour otherwise. Details are in
+`opencreator-fs/config-docs/CREATOR5_MPC.md`.
