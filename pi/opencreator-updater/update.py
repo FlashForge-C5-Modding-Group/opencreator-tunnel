@@ -153,12 +153,16 @@ def pull_klipper():
     return changed
 
 
-def restart_klipper():
-    req = urllib.request.Request(
-        MOONRAKER_API + "/printer/restart", method="POST")
+def restart_klipper(code_changed):
+    # /printer/restart only reloads the config inside the running klippy
+    # process; new Python code from a pull needs the service restarted.
+    path = ("/machine/services/restart?service=klipper" if code_changed
+            else "/printer/restart")
+    req = urllib.request.Request(MOONRAKER_API + path, method="POST")
     try:
         urllib.request.urlopen(req, timeout=10)
-        log("klipper: restart requested via Moonraker API")
+        log("klipper: %s requested via Moonraker API"
+            % ("service restart" if code_changed else "config restart"))
     except urllib.error.URLError as exc:
         log("klipper: restart request failed (%s); restart manually" % (exc,))
 
@@ -170,6 +174,10 @@ def main():
     conflicts = [n for n, r in results.items() if r == "conflict"]
     config_changed = any(r in ("merged", "new") for r in results.values())
     klipper_changed = pull_klipper()
+    if conflicts and klipper_changed:
+        # Conflicted live files were left untouched and still valid, so
+        # load the pulled code now rather than waiting on a manual merge.
+        restart_klipper(True)
     if conflicts:
         log("")
         log("CONFLICTS in: %s" % (", ".join(conflicts),))
@@ -178,7 +186,7 @@ def main():
             "it, then copy over by hand whatever you want to keep.")
         return 1
     if config_changed or klipper_changed:
-        restart_klipper()
+        restart_klipper(klipper_changed)
     else:
         log("nothing changed")
     return 0
