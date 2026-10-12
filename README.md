@@ -69,6 +69,34 @@ ssh root@<printer-ip> reboot
 ## SBC
 
 1. Install Raspberry Pi OS Lite (or Armbian) with network access.
+
+### Automatic install
+
+As your normal user (not root):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/FlashForge-C5-Modding-Group/opencreator-tunnel/main/pi/install.sh | sh
+```
+
+`pi/install.sh` downloads and installs, in order:
+
+1. **This repo** into `~/opencreator-tunnel`.
+2. **Fluidd**: the latest release goes into `~/fluidd`, served by nginx on port 80. `fluidd-config` goes into `~/fluidd-config`.
+3. **Moonraker** into `~/moonraker`. If there is no `moonraker.conf`, the script writes one with update-manager entries for Fluidd, fluidd-config and the OpenCreator updater.
+4. **Kalico** from `FlashForge-C5-Modding-Group/kalico`, branch `something`, into `~/klipper`, with `klipper.service` using the `~/printer_data` layout.
+
+Then it sets up the printer:
+
+5. **Config**: if `printer.cfg` doesn't exist yet, it copies in `pi/config` plus the Kalico overlay (`printer.motor.cfg`, `printer.kalico_mpc.cfg`). An existing config is left alone.
+6. **Updater**: installs the OpenCreator updater service.
+7. **Tunnel**: runs `setup-gadget.sh` and starts the services. On a first install, reboot so the USB gadget comes up; Klipper starts after it.
+
+Running it again updates the git checkouts and Fluidd, and leaves your config alone.
+
+Environment overrides: `TUNNEL_REPO`, `TUNNEL_BRANCH`, `KALICO_REPO`, `KALICO_BRANCH`, `MOONRAKER_REPO`, `FLUIDD_ZIP`, `FLUIDD_CONFIG_REPO`.
+
+### Manual install
+
 2. Copy `pi/` to the SBC and run `sudo sh pi/setup-gadget.sh`, then reboot.
    `ls -l /dev/ttyGS0 /dev/ttyGS1 /dev/ttyGS2 /dev/ttyGS3` must list four
    devices.
