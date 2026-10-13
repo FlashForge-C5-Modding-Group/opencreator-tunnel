@@ -82,7 +82,7 @@ curl -fsSL https://raw.githubusercontent.com/FlashForge-C5-Modding-Group/opencre
 
 1. **This repo** into `~/opencreator-tunnel`.
 2. **Fluidd**: the latest release goes into `~/fluidd`, served by nginx on port 80. `fluidd-config` goes into `~/fluidd-config`.
-3. **Moonraker** into `~/moonraker`. If there is no `moonraker.conf`, the script writes one with update-manager entries for Fluidd, fluidd-config and the OpenCreator updater.
+3. **Moonraker** into `~/moonraker`. If there is no `moonraker.conf`, the script writes one with update-manager entries for Fluidd, fluidd-config and the OpenCreator updater. It also links the `opencreator_3mf` component into Moonraker and adds `[opencreator_3mf]` to `moonraker.conf` (see [3MF uploads](#3mf-uploads)).
 4. **Kalico** from `FlashForge-C5-Modding-Group/kalico`, branch `something`, into `~/klipper`, with `klipper.service` using the `~/printer_data` layout.
 
 Then it sets up the printer:
@@ -161,6 +161,34 @@ The bridge runs the printer's stock mjpg-streamer on port 8080. In Mainsail
 add a webcam with stream URL `http://<printer-ip>:8080/?action=stream` and
 snapshot URL `http://<printer-ip>:8080/?action=snapshot`. Its output goes to
 `/usr/data/logs/c5-camera.log`.
+
+## 3MF uploads
+
+Moonraker accepts sliced 3MF files (OrcaSlicer or Bambu Studio "Export plate
+sliced file", `.gcode.3mf`) uploaded to the gcodes folder, including uploads
+with "print" set. The `opencreator_3mf` component in `pi/moonraker` repacks the
+upload as a UFP, so Moonraker's own UFP handling extracts it: `part.gcode.3mf`
+is stored as `part.gcode`, with the plate preview as its thumbnail, and the
+3MF itself is not kept.
+
+- Only the lowest-numbered sliced plate (`Metadata/plate_N.gcode`) is used.
+  Export one plate per file.
+- A 3MF with no sliced G-code (a project or model file) is rejected.
+- The G-code must be sliced for this printer; nothing in it is converted.
+- Only uploads are handled. A 3MF copied into `gcodes` by other means is
+  ignored.
+
+The component is a symlink in `~/moonraker/moonraker/components`, so
+Moonraker's checkout stays unmodified and its updates keep working. It needs
+`[opencreator_3mf]` in `moonraker.conf`; `install.sh` adds both. To set it up
+by hand:
+
+```sh
+ln -sf ~/opencreator-tunnel/pi/moonraker/opencreator_3mf.py \
+    ~/moonraker/moonraker/components/opencreator_3mf.py
+printf '\n[opencreator_3mf]\n' >> ~/printer_data/config/moonraker.conf
+sudo systemctl restart moonraker
+```
 
 ## Disconnects and restarts
 

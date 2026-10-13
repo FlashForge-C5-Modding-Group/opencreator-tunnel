@@ -166,6 +166,10 @@ managed_services: opencreator-updater
 EOF
 fi
 "$MOONRAKER_DIR/scripts/install-moonraker.sh" -f -d "$DATA"
+ln -sf "$PI/moonraker/opencreator_3mf.py" \
+    "$MOONRAKER_DIR/moonraker/components/opencreator_3mf.py"
+grep -q '^\[opencreator_3mf\]' "$CONFIG/moonraker.conf" ||
+    printf '\n[opencreator_3mf]\n' >> "$CONFIG/moonraker.conf"
 grep -qx opencreator-updater "$DATA/moonraker.asvc" 2>/dev/null ||
     echo opencreator-updater >> "$DATA/moonraker.asvc"
 
