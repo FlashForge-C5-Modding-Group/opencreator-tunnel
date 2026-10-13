@@ -1,43 +1,88 @@
 #!/bin/sh
-# Set up the OpenCreator Updater on a Pi tunnel install: a oneshot systemd
-# service Moonraker's update_manager restarts whenever this repo is pulled,
-# which merges pi/config/*.cfg's latest changes into printer_data/config
-# (preserving user edits -- see update.py) and pulls Klipper.
-#
-# Run this (as the normal user, not root -- it calls sudo itself only for
-# the two steps that need it) from the already-cloned ~/opencreator-tunnel
-# checkout.
+# Set up the OpenCreator Updater for this checkout, wherever it lives:
+# opencreator-updater.service, the moonraker.asvc entry and the
+# [update_manager opencreator-updater] section in moonraker.conf (added,
+# or corrected in place). Safe to rerun; see README.md ("OpenCreator
+# Updater"). Prints one "opencreator-updater: ..." line per change.
 set -eu
-HERE=$(cd "$(dirname "$0")" && pwd)
-ASVC="$HOME/printer_data/moonraker.asvc"
+HERE=$(cd "$(dirname "$0")" && pwd -P)
+OC_USER=${SUDO_USER:-$(id -un)}
+if [ -n "${SUDO_USER:-}" ]; then OC_HOME=$(eval echo "~$SUDO_USER"); else OC_HOME=$HOME; fi
+REPO_DIR=${OC_REPO_DIR:-$(git -C "$HERE" rev-parse --show-toplevel 2>/dev/null ||
+    (cd "$HERE/../.." && pwd -P))}
+DATA=${OC_DATA:-$OC_HOME/printer_data}
+CONF=$DATA/config/moonraker.conf
+ASVC=$DATA/moonraker.asvc
+ORIGIN=${TUNNEL_REPO:-https://github.com/FlashForge-C5-Modding-Group/opencreator-tunnel.git}
+BRANCH=${TUNNEL_BRANCH:-main}
+SECTION="update_manager opencreator-updater"
+UNIT=/etc/systemd/system/opencreator-updater.service
 
-# Service file templating: plain systemd units can't expand shell
-# variables in User=/ExecStart=, so substitute the actual invoking
-# user (not root -- this script only elevates for the two steps that
-# need it) and their home directory into placeholders before install.
-OC_USER="${SUDO_USER:-$(whoami)}"
-OC_HOME=$(eval echo "~$OC_USER")
-TMP_SERVICE=$(mktemp)
-sed "s|__OC_USER__|$OC_USER|g; s|__OC_HOME__|$OC_HOME|g" \
-    "$HERE/opencreator-updater.service" >"$TMP_SERVICE"
-sudo cp "$TMP_SERVICE" /etc/systemd/system/opencreator-updater.service
-rm -f "$TMP_SERVICE"
-sudo systemctl daemon-reload
+say() { echo "opencreator-updater: $*"; }
 
-if [ -f "$ASVC" ] && ! grep -qx "opencreator-updater" "$ASVC"; then
-    echo "opencreator-updater" >> "$ASVC"
+git -C "$REPO_DIR" rev-parse --verify -q HEAD >/dev/null 2>&1 ||
+    say "warning: $REPO_DIR is not a git checkout; Moonraker cannot update it (run repair.sh)"
+
+# --- service
+tmp=$(mktemp)
+sed -e "s|__OC_USER__|$OC_USER|g" -e "s|__OC_DATA__|$DATA|g" \
+    -e "s|__OC_REPO__|$REPO_DIR|g" "$HERE/opencreator-updater.service" >"$tmp"
+if ! cmp -s "$tmp" "$UNIT" 2>/dev/null; then
+    sudo cp "$tmp" "$UNIT"
+    sudo systemctl daemon-reload
+    say "installed $UNIT for $REPO_DIR"
+fi
+rm -f "$tmp"
+
+# --- moonraker.asvc
+if [ -f "$ASVC" ] && ! grep -qx opencreator-updater "$ASVC"; then
+    echo opencreator-updater >>"$ASVC"
+    say "added opencreator-updater to $ASVC"
 fi
 
-cat <<'EOF'
-Service installed. Add this to moonraker.conf, then restart moonraker:
+# --- moonraker.conf: path is accepted as absolute or ~/-relative
+[ -f "$CONF" ] || { say "no $CONF; add the [$SECTION] section by hand"; exit 0; }
+tilde=$REPO_DIR
+case $REPO_DIR in "$OC_HOME"/*) tilde="~/${REPO_DIR#"$OC_HOME"/}" ;; esac
 
-[update_manager opencreator-updater]
-type: git_repo
-path: ~/opencreator-tunnel
-origin: https://github.com/FlashForge-C5-Modding-Group/opencreator-tunnel.git
-primary_branch: main
-managed_services: opencreator-updater
+if ! grep -q "^\[$SECTION\]" "$CONF"; then
+    printf '\n[%s]\ntype: git_repo\npath: %s\norigin: %s\nprimary_branch: %s\nmanaged_services: opencreator-updater\n' \
+        "$SECTION" "$tilde" "$ORIGIN" "$BRANCH" >>"$CONF"
+    say "added [$SECTION] to $CONF"
+    exit 0
+fi
 
-First run only seeds the merge-tracking baseline and does not change any
-live config file; real auto-merging starts on the run after that one.
-EOF
+tmp=$(mktemp)
+awk -v sec="[$SECTION]" -v p="$tilde" -v pa="$REPO_DIR" -v o="$ORIGIN" -v b="$BRANCH" '
+    function put(k, v) { print k ": " v; seen[k] = 1 }
+    function flush() {
+        if (!insec) return
+        if (!seen["type"]) put("type", "git_repo")
+        if (!seen["path"]) put("path", p)
+        if (!seen["origin"]) put("origin", o)
+        if (!seen["primary_branch"]) put("primary_branch", b)
+        if (!seen["managed_services"]) put("managed_services", "opencreator-updater")
+        insec = 0
+    }
+    /^\[/ { flush(); insec = ($0 == sec); skip = 0 }
+    insec && skip && /^[ \t]+[^ \t]/ { next }
+    insec { skip = 0 }
+    insec && match($0, /^[a-z_]+[ \t]*[:=]/) {
+        k = $0; sub(/[ \t]*[:=].*/, "", k)
+        v = $0; sub(/^[^:=]*[:=][ \t]*/, "", v); sub(/[ \t]+$/, "", v)
+        if (k in seen) { skip = 1; next }
+        if (k == "path" && (v == p || v == pa)) { seen[k] = 1; print; next }
+        if (k == "type") { put(k, "git_repo"); skip = 1; next }
+        if (k == "path") { put(k, p); skip = 1; next }
+        if (k == "origin") { put(k, o); skip = 1; next }
+        if (k == "primary_branch") { put(k, b); skip = 1; next }
+        seen[k] = 1
+    }
+    { print }
+    END { flush() }' "$CONF" >"$tmp"
+if ! cmp -s "$tmp" "$CONF"; then
+    cp "$CONF" "$CONF.bak-updater"
+    cat "$tmp" >"$CONF"
+    say "corrected [$SECTION] in $CONF (backup: moonraker.conf.bak-updater)"
+fi
+rm -f "$tmp"

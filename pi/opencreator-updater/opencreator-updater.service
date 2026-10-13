@@ -5,4 +5,5 @@ After=network-online.target
 [Service]
 Type=oneshot
 User=__OC_USER__
-ExecStart=/usr/bin/python3 __OC_HOME__/opencreator-tunnel/pi/opencreator-updater/update.py
+Environment=OC_UPDATER_CONFIG_DIR=__OC_DATA__/config
+ExecStart=/usr/bin/python3 __OC_REPO__/pi/opencreator-updater/update.py

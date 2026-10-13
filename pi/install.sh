@@ -15,7 +15,7 @@ FLUIDD_ZIP=${FLUIDD_ZIP:-https://github.com/fluidd-core/fluidd/releases/latest/d
 FLUIDD_CONFIG_REPO=${FLUIDD_CONFIG_REPO:-https://github.com/fluidd-core/fluidd-config.git}
 
 OC_USER=$(whoami)
-TUNNEL_DIR=$HOME/opencreator-tunnel
+TUNNEL_DIR=${TUNNEL_DIR:-$HOME/opencreator-tunnel}
 KLIPPER_DIR=$HOME/klipper
 KLIPPY_ENV=$HOME/klippy-env
 MOONRAKER_DIR=$HOME/moonraker
@@ -156,13 +156,6 @@ primary_branch: master
 path: ~/fluidd-config
 origin: $FLUIDD_CONFIG_REPO
 managed_services: klipper
-
-[update_manager opencreator-updater]
-type: git_repo
-path: ~/opencreator-tunnel
-origin: $TUNNEL_REPO
-primary_branch: $TUNNEL_BRANCH
-managed_services: opencreator-updater
 EOF
 fi
 "$MOONRAKER_DIR/scripts/install-moonraker.sh" -f -d "$DATA"
@@ -170,8 +163,6 @@ ln -sf "$PI/moonraker/opencreator_3mf.py" \
     "$MOONRAKER_DIR/moonraker/components/opencreator_3mf.py"
 grep -q '^\[opencreator_3mf\]' "$CONFIG/moonraker.conf" ||
     printf '\n[opencreator_3mf]\n' >> "$CONFIG/moonraker.conf"
-grep -qx opencreator-updater "$DATA/moonraker.asvc" 2>/dev/null ||
-    echo opencreator-updater >> "$DATA/moonraker.asvc"
 
 step "Kalico ($KALICO_BRANCH)"
 clone_or_update "$KLIPPER_DIR" "$KALICO_REPO" "$KALICO_BRANCH"
@@ -213,7 +204,7 @@ else
 fi
 
 step "OpenCreator updater"
-sh "$PI/opencreator-updater/install.sh" >/dev/null
+OC_REPO_DIR=$TUNNEL_DIR OC_DATA=$DATA sh "$PI/opencreator-updater/install.sh"
 
 step "Tunnel gadget service"
 sudo sh "$PI/setup-gadget.sh"

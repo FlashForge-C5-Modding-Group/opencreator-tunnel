@@ -190,6 +190,41 @@ printf '\n[opencreator_3mf]\n' >> ~/printer_data/config/moonraker.conf
 sudo systemctl restart moonraker
 ```
 
+## OpenCreator Updater
+
+`pi/opencreator-updater/install.sh` sets up the updater for the checkout it
+is in, wherever that is and whichever user runs it: `opencreator-updater.service`,
+the `moonraker.asvc` entry and the `[update_manager opencreator-updater]`
+section in `moonraker.conf`. The section is added if missing, or corrected in
+place (path, origin, branch, duplicate options; backup
+`moonraker.conf.bak-updater`). The updater always follows `main` of
+`FlashForge-C5-Modding-Group/opencreator-tunnel`. Overrides: `OC_REPO_DIR`,
+`OC_DATA` (default `~/printer_data`), `TUNNEL_REPO`, `TUNNEL_BRANCH`.
+
+### Updater repair
+
+If Fluidd or Mainsail shows "No git repo detected at configured path",
+"Failed to detect git branch" or "Failed to detect repo url" for
+`opencreator-updater`, run as your normal user:
+
+```sh
+sh <path-to-opencreator-tunnel>/pi/opencreator-updater/repair.sh
+```
+
+It works on the tree it is in, git or not:
+
+- A copied tree without git gets a repository started in place; a broken
+  `.git` is moved to `.git.broken-<date>`.
+- Files owned by another user are given back (needs `sudo`).
+- The origin is set to the official repository and the checkout is moved onto
+  `main`, tracking `origin/main`. Local edits to tracked files are stashed,
+  not discarded (`git stash pop` brings them back).
+- Then it runs `install.sh` and restarts Moonraker.
+
+If Moonraker does not start because of a duplicate option in
+`[update_manager opencreator-updater]`, running `repair.sh` also fixes that;
+restart Moonraker afterwards with `sudo systemctl restart moonraker`.
+
 ## Disconnects and restarts
 
 - `FIRMWARE_RESTART` resets every MCU. The levelBoard reset lands in its
