@@ -190,6 +190,42 @@ printf '\n[opencreator_3mf]\n' >> ~/printer_data/config/moonraker.conf
 sudo systemctl restart moonraker
 ```
 
+## Slicer time estimates
+
+OrcaSlicer's FlashForge Creator 5 profiles set **File start G-code** to a
+FlashForge-style estimate line (`{print_time_day}d {print_time_hour}h ...`).
+Orca also writes that setting, unfilled, into the config block at the end of
+the file. Moonraker takes the first `; estimated printing time` it finds in the
+last 1 MiB, so it reads the template, finds no numbers and stores
+`estimated_time: 0`.
+
+The fix is to clear **Printer settings → Machine G-code → File start G-code**
+in Orca. For files sliced with the setting still in place, `opencreator_3mf`
+also changes `estimated printing time` to `estimated_printing_time` inside any
+`; *_gcode = ` setting line in the footer of an uploaded G-code (or of the
+G-code inside a 3MF). The change is in place and the same length, and Moonraker
+then reads the real `; estimated printing time (normal mode) = ...` line.
+Files already on the printer keep `0` until uploaded again.
+
+## Fluidd theme
+
+`pi/config/.fluidd-theme/custom.css` is an extra-dark OpenCreator theme for
+Fluidd: near-black surfaces, the OpenCreator logo (orange gradient) in the top
+bar and as the background watermark, orange highlights. Fluidd loads it from
+`~/printer_data/config/.fluidd-theme/`. New installs get it with the config,
+and the updater adds it to existing ones. `install.sh` also sets Fluidd's
+accent color to `#FF6A2B` unless you already chose a color other than the
+default. It also gives Fluidd the OpenCreator macro layout from
+`pi/fluidd/macros.json` (On / Off, Calibrations, Toolhead and Misc) if Fluidd
+has no macro layout yet.
+
+- The theme is for dark mode (Settings → Theme → Dark). Light mode only gets
+  the logo.
+- The logos are embedded in the CSS, generated from the docs logo
+  (`OpenCreator/docs/assets/logo.svg`).
+- To go back to stock Fluidd, delete or rename `.fluidd-theme/custom.css` and
+  reload the page.
+
 ## OpenCreator Updater
 
 `pi/opencreator-updater/install.sh` sets up the updater for the checkout it

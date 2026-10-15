@@ -116,10 +116,14 @@ def merge_one(name, live_path, base_path, template_path):
 def sync_configs():
     BASE_DIR.mkdir(parents=True, exist_ok=True)
     results = {}
-    for template_path in sorted(TEMPLATE_DIR.glob("*.cfg")):
-        name = template_path.name
+    templates = sorted(TEMPLATE_DIR.glob("*.cfg"))
+    templates += sorted(TEMPLATE_DIR.glob(".fluidd-theme/*"))
+    for template_path in templates:
+        name = template_path.relative_to(TEMPLATE_DIR).as_posix()
         live_path = CONFIG_DIR / name
         base_path = BASE_DIR / name
+        live_path.parent.mkdir(parents=True, exist_ok=True)
+        base_path.parent.mkdir(parents=True, exist_ok=True)
         outcome = merge_one(name, live_path, base_path, template_path)
         results[name] = outcome
         if outcome in ("merged", "new", "bootstrap", "unchanged"):

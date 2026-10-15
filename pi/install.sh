@@ -211,6 +211,26 @@ sudo sh "$PI/setup-gadget.sh"
 
 step "Starting"
 sudo systemctl restart moonraker
+
+# OpenCreator accent color for the Fluidd theme in .fluidd-theme, unless
+# the user already picked a color other than Fluidd's default.
+api=http://127.0.0.1:7125/server/database/item
+i=0
+until curl -fs http://127.0.0.1:7125/server/info >/dev/null 2>&1 || [ $i -ge 30 ]; do
+    sleep 1; i=$((i + 1))
+done
+color=$(curl -fs "$api?namespace=fluidd&key=uiSettings.theme.color" 2>/dev/null || true)
+case $color in
+*'"#'[0-9A-Fa-f]*) echo "$color" | grep -qi '#2196F3' || color=keep ;;
+esac
+[ "$color" = keep ] ||
+    curl -fs -X POST -H 'Content-Type: application/json' \
+        -d '{"namespace":"fluidd","key":"uiSettings.theme.color","value":"#FF6A2B"}' \
+        "$api" >/dev/null || true
+# OpenCreator macro categories for Fluidd, unless the user already has a layout.
+curl -fs "$api?namespace=fluidd&key=macros" >/dev/null 2>&1 ||
+    { printf '{"namespace":"fluidd","key":"macros","value":'; cat "$PI/fluidd/macros.json"; printf '}'; } |
+    curl -fs -X POST -H 'Content-Type: application/json' -d @- "$api" >/dev/null || true
 if [ -n "$(ls /sys/class/udc 2>/dev/null)" ]; then
     sudo systemctl restart klipper
     echo "Done. Fluidd: http://$(hostname -I | cut -d' ' -f1)/"

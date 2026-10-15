@@ -26,6 +26,29 @@ if TYPE_CHECKING:
 PLATE_RE = re.compile(r"^/?Metadata/plate_(\d+)\.gcode$")
 UFP_MODEL_PATH = "/3D/model.gcode"
 UFP_THUMB_PATH = "/Metadata/thumbnail.png"
+GCODE_EXTS = (".gcode", ".g", ".gco")
+GCODE_SETTING_RE = re.compile(rb"^; \w+_gcode = [^\n]*", re.M)
+ESTIMATE_TEXT = b"estimated printing time"
+ESTIMATE_HIDDEN = b"estimated_printing_time"
+FOOTER_SIZE = 1024 * 1024
+CHUNK_SIZE = 1024 * 1024
+
+
+def hide_estimate_templates(path: str) -> bool:
+    start = max(0, os.path.getsize(path) - FOOTER_SIZE)
+    changed = False
+    with open(path, "rb+") as f:
+        f.seek(start)
+        footer = f.read()
+        for match in GCODE_SETTING_RE.finditer(footer):
+            line = match.group(0)
+            index = line.find(ESTIMATE_TEXT)
+            while index >= 0:
+                f.seek(start + match.start() + index)
+                f.write(ESTIMATE_HIDDEN)
+                changed = True
+                index = line.find(ESTIMATE_TEXT, index + 1)
+    return changed
 
 
 def find_plate(names: List[str]) -> Tuple[str, Optional[str]]:
@@ -46,15 +69,22 @@ def repack_as_ufp(path: str) -> None:
         gcode, thumb = find_plate(src.namelist())
         fd, tmp_path = tempfile.mkstemp(dir=os.path.dirname(path))
         os.close(fd)
+        fd, gcode_path = tempfile.mkstemp(dir=os.path.dirname(path))
+        os.close(fd)
         try:
+            with src.open(gcode) as fin, open(gcode_path, "wb") as fout:
+                shutil.copyfileobj(fin, fout, CHUNK_SIZE)
+            hide_estimate_templates(gcode_path)
             with zipfile.ZipFile(tmp_path, "w", zipfile.ZIP_STORED) as dst:
-                with src.open(gcode) as fin, dst.open(UFP_MODEL_PATH, "w") as fout:
-                    shutil.copyfileobj(fin, fout, 1024 * 1024)
+                with open(gcode_path, "rb") as fin, dst.open(UFP_MODEL_PATH, "w") as fout:
+                    shutil.copyfileobj(fin, fout, CHUNK_SIZE)
                 if thumb is not None:
                     dst.writestr(UFP_THUMB_PATH, src.read(thumb))
         except Exception:
             os.remove(tmp_path)
             raise
+        finally:
+            os.remove(gcode_path)
     os.replace(tmp_path, path)
 
 
@@ -89,6 +119,15 @@ class OpenCreator3mf:
                 raise self.server.error(f"Unable to read 3MF {filename}: {e}")
             logging.info(f"3MF upload {filename} repacked for gcode extraction")
             form_args = dict(form_args, filename=ufp_name(filename))
+        elif root == "gcodes" and filename.lower().endswith(GCODE_EXTS):
+            try:
+                changed = await self.event_loop.run_in_thread(
+                    hide_estimate_templates, form_args["tmp_file_path"])
+            except Exception:
+                logging.exception(f"Unable to check time estimate in {filename}")
+            else:
+                if changed:
+                    logging.info(f"{filename}: hid slicer estimate template")
         return await self.finalize_upload(form_args)
 
 
