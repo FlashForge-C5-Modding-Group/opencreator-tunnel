@@ -53,12 +53,17 @@ PI=$TUNNEL_DIR/pi
 mkdir -p "$CONFIG" "$DATA/logs" "$DATA/comms" "$DATA/gcodes" "$DATA/systemd"
 
 step "Fluidd"
-tmp=$(mktemp -d)
-curl -fL -o "$tmp/fluidd.zip" "$FLUIDD_ZIP"
-rm -rf "$FLUIDD_DIR"
-mkdir -p "$FLUIDD_DIR"
-unzip -q "$tmp/fluidd.zip" -d "$FLUIDD_DIR"
-rm -rf "$tmp"
+# An installed Fluidd is left to Moonraker's update manager, so files added
+# to it stay; only a missing one is downloaded.
+if [ -f "$FLUIDD_DIR/index.html" ]; then
+    echo "Fluidd already installed, left as-is"
+else
+    tmp=$(mktemp -d)
+    curl -fL -o "$tmp/fluidd.zip" "$FLUIDD_ZIP"
+    mkdir -p "$FLUIDD_DIR"
+    unzip -q -o "$tmp/fluidd.zip" -d "$FLUIDD_DIR"
+    rm -rf "$tmp"
+fi
 clone_or_update "$FLUIDD_CONFIG_DIR" "$FLUIDD_CONFIG_REPO" master
 ln -sf "$FLUIDD_CONFIG_DIR/client.cfg" "$CONFIG/fluidd.cfg"
 
@@ -196,11 +201,31 @@ sudo systemctl daemon-reload
 sudo systemctl enable klipper.service
 
 step "Printer config"
-if [ ! -f "$CONFIG/printer.cfg" ]; then
-    cp -r "$PI/config/." "$CONFIG/"
-    cp "$PI/kalico/printer.motor.cfg" "$PI/kalico/printer.kalico_mpc.cfg" "$CONFIG/"
-else
-    echo "printer.cfg already exists, config left as-is"
+# Files the config doesn't have yet are added; every existing file is kept
+# (the OpenCreator updater merges template changes into them).
+added=0
+kept=0
+copy_missing() {  # copy_missing SRC_FILE DEST_FILE
+    if [ -e "$2" ]; then
+        kept=$((kept + 1))
+    else
+        mkdir -p "$(dirname "$2")"
+        cp -p "$1" "$2"
+        added=$((added + 1))
+    fi
+}
+# Kalico's motor/MPC files replace the generic ones, so they go first.
+for f in printer.motor.cfg printer.kalico_mpc.cfg; do
+    copy_missing "$PI/kalico/$f" "$CONFIG/$f"
+done
+for src in $(cd "$PI/config" && find . -type f); do
+    copy_missing "$PI/config/$src" "$CONFIG/$src"
+done
+echo "Config: $added files added, $kept existing files kept"
+# AFC stops with an error while its variables file is missing or empty.
+if [ ! -s "$CONFIG/AFC/AFC.var.unit" ]; then
+    mkdir -p "$CONFIG/AFC"
+    echo '{}' > "$CONFIG/AFC/AFC.var.unit"
 fi
 
 step "OpenCreator updater"

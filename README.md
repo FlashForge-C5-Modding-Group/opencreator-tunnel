@@ -7,8 +7,9 @@ cable and serves the built-in camera. Stock `firmwareExe`, stock Klipper,
 Moonraker, nginx and the touchscreen UI no longer run on the printer.
 
 All four MCUs (mainBoardGD, heaterBoard, eBoard, levelBoard) must run
-[klipper-c5](https://github.com/wondercrash/klipper-c5) firmware. The SBC
-runs Klipper from the same repository (branch `c5`).
+[Kalico](https://github.com/FlashForge-C5-Modding-Group/kalico) firmware. The
+SBC runs Kalico from the same repository (branch `something`). klipper-c5 is
+archived.
 
 ```
 SBC (Klipper, Moonraker, Mainsail)
@@ -102,10 +103,10 @@ Environment overrides: `TUNNEL_REPO`, `TUNNEL_BRANCH`, `KALICO_REPO`, `KALICO_BR
    devices.
 3. Install Klipper, Moonraker and Mainsail with
    [KIAUH](https://github.com/dw-0/kiauh). For Klipper, use the custom
-   repository `https://github.com/wondercrash/klipper-c5`, branch `c5`. It
-   provides the `[mclib]` module that configures the mainBoardGD motors
-   (currents, microstepping, resonance damping) and `[c5_endstop_probe]`,
-   used by the tool calibrations; upstream Klipper lacks both.
+   repository `https://github.com/FlashForge-C5-Modding-Group/kalico`, branch
+   `something`. It provides the `[mclib]` module that configures the
+   mainBoardGD motors (currents, microstepping, resonance damping) and the
+   other Creator 5 modules; upstream Klipper lacks them.
    Moonraker's update manager may report the fork as unofficial; that is
    cosmetic.
 4. Copy `pi/config/*.cfg` to `~/printer_data/config/` (keep the
@@ -209,9 +210,11 @@ Files already on the printer keep `0` until uploaded again.
 
 ## Fluidd theme
 
-`pi/config/.fluidd-theme/custom.css` is an extra-dark OpenCreator theme for
-Fluidd: near-black surfaces, the OpenCreator logo (orange gradient) in the top
-bar and as the background watermark, orange highlights. Fluidd loads it from
+`pi/config/.fluidd-theme/custom.css` is a plain dark OpenCreator theme for
+Fluidd: flat dark-grey surfaces with thin borders (no gradients, glows or
+blur), the white OpenCreator logo in the top bar and as the background
+watermark, and the primary color picked in Fluidd's theme settings (orange
+by default) only for the active menu item and selections. Fluidd loads it from
 `~/printer_data/config/.fluidd-theme/`. New installs get it with the config,
 and the updater adds it to existing ones. `install.sh` also sets Fluidd's
 accent color to `#FF6A2B` unless you already chose a color other than the

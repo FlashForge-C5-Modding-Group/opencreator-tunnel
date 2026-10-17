@@ -3,7 +3,7 @@
 Copy the normal `pi/config` tree to the Pi's `~/printer_data/config/`, then
 copy `pi/kalico/printer.motor.cfg` over its `printer.motor.cfg`. Restart
 Klipper after replacing the file. This overlay is for Kalico; it does not
-change the stock Klipper-C5 configuration.
+change the base `pi/config` files.
 
 The tunneled printer.cfg sets `pressure_advance_smooth_time: 0.06` on all
 four logical extruders. The shared eboard step pin has about 1086 steps/mm
