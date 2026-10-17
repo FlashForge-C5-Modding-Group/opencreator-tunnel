@@ -161,6 +161,20 @@ primary_branch: master
 path: ~/fluidd-config
 origin: $FLUIDD_CONFIG_REPO
 managed_services: klipper
+
+# Phone/chat notifications through Apprise. Uncomment and put in your
+# service's URL (Discord, Telegram, ntfy, Pushover, ...):
+# https://github.com/caronc/apprise/wiki
+#[notifier print_events]
+#url: tgram://BOT_TOKEN/CHAT_ID
+#events: complete, error, cancelled, paused
+#title: OpenCreator
+#body: Print {event_name}: {event_args[1].filename}
+
+# Spool tracking with a Spoolman server. Uncomment and set its address.
+#[spoolman]
+#server: http://192.168.1.100:7912
+#sync_rate: 5
 EOF
 fi
 "$MOONRAKER_DIR/scripts/install-moonraker.sh" -f -d "$DATA"
