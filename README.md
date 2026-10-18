@@ -94,7 +94,29 @@ Then it sets up the printer:
 
 Running it again updates the git checkouts and Fluidd, and leaves your config alone.
 
-Environment overrides: `TUNNEL_REPO`, `TUNNEL_BRANCH`, `KALICO_REPO`, `KALICO_BRANCH`, `MOONRAKER_REPO`, `FLUIDD_ZIP`, `FLUIDD_CONFIG_REPO`.
+For detailed pip output, including NumPy build steps during "Preparing metadata",
+use `--verbose` (or `-v`). Add `--skip-cython` to skip compiling Cython itself:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/FlashForge-C5-Modding-Group/opencreator-tunnel/main/pi/install.sh | sh -s -- --skip-cython --verbose
+```
+
+`--skip-cython` sets `NO_CYTHON_COMPILE=true`: Cython's Python implementation
+remains available for dependencies such as NumPy. NumPy's own compilation still
+runs. These options can also be enabled with `SKIP_CYTHON=1` and `VERBOSE=1`.
+Verbosity must be selected when starting the installer.
+
+Build temporary files default to `~/.cache/opencreator/build-tmp` on the SD card,
+avoiding the small RAM-backed `/tmp` on many SBC images. Set `TMPDIR` to choose
+another directory. NumPy source builds default to two workers; set
+`NUMPY_BUILD_JOBS` to a positive integer to change the limit.
+
+The installer installs `libopenblas-dev` and links NumPy against OpenBLAS,
+avoiding its large bundled LAPACK fallback sources. On 32-bit ARM, it also omits
+optional CPU dispatch variants to avoid the NEON code that crashed GCC 14;
+baseline kernels are still built, with fewer CPU-specific optimizations.
+
+Environment overrides: `TUNNEL_REPO`, `TUNNEL_BRANCH`, `KALICO_REPO`, `KALICO_BRANCH`, `MOONRAKER_REPO`, `FLUIDD_ZIP`, `FLUIDD_CONFIG_REPO`, `SKIP_CYTHON`, `VERBOSE`, `NUMPY_BUILD_JOBS`, `TMPDIR`.
 
 ### Manual install
 

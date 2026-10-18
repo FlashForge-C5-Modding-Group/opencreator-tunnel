@@ -4,7 +4,53 @@
 # README.md ("SBC").
 set -eu
 
+SKIP_CYTHON=${SKIP_CYTHON:-0}
+VERBOSE=${VERBOSE:-0}
+NUMPY_BUILD_JOBS=${NUMPY_BUILD_JOBS:-2}
+for option in "$@"; do
+    case $option in
+        --skip-cython) SKIP_CYTHON=1 ;;
+        -v|--verbose) VERBOSE=1 ;;
+        -h|--help)
+            echo "Usage: sh pi/install.sh [--skip-cython] [--verbose]"
+            echo "  --skip-cython  Skip compiling Cython itself; use its Python implementation."
+            echo "  -v, --verbose Enable detailed pip and build output."
+            exit 0 ;;
+        *) echo "Unknown option: $option" >&2; exit 2 ;;
+    esac
+done
+
 [ "$(id -u)" -ne 0 ] || { echo "run as your normal user, not root" >&2; exit 1; }
+
+# This environment option also reaches pip's isolated build environments.
+case $SKIP_CYTHON in
+    0) ;;
+    1)
+        export NO_CYTHON_COMPILE=true
+        echo "Skipping Cython compilation (Python implementation remains available)" ;;
+    *) echo "SKIP_CYTHON must be 0 or 1" >&2; exit 2 ;;
+esac
+case $VERBOSE in
+    0) ;;
+    1)
+        case ${PIP_VERBOSE:-0} in 0) PIP_VERBOSE=1 ;; esac
+        export PIP_VERBOSE
+        export PYTHONUNBUFFERED=1
+        echo "Verbose pip and build output enabled" ;;
+    *) echo "VERBOSE must be 0 or 1" >&2; exit 2 ;;
+esac
+case $NUMPY_BUILD_JOBS in
+    ''|*[!0-9]*) echo "NUMPY_BUILD_JOBS must be a positive integer" >&2; exit 2 ;;
+esac
+[ "$NUMPY_BUILD_JOBS" -gt 0 ] || {
+    echo "NUMPY_BUILD_JOBS must be a positive integer" >&2; exit 2
+}
+
+# SBC images often mount /tmp as a small RAM filesystem. Use the SD card
+# for unpacked source, build dependencies and compiler temporary files.
+TMPDIR=${TMPDIR:-$HOME/.cache/opencreator/build-tmp}
+mkdir -p "$TMPDIR"
+export TMPDIR
 
 TUNNEL_REPO=${TUNNEL_REPO:-https://github.com/FlashForge-C5-Modding-Group/opencreator-tunnel.git}
 TUNNEL_BRANCH=${TUNNEL_BRANCH:-main}
@@ -44,7 +90,7 @@ step "System packages"
 sudo apt-get update
 sudo apt-get install --yes git curl unzip nginx python3 python3-venv \
     python3-dev libffi-dev build-essential libncurses-dev libusb-dev \
-    pkg-config ffmpeg
+    pkg-config ffmpeg libopenblas-dev
 
 step "opencreator-tunnel ($TUNNEL_BRANCH)"
 clone_or_update "$TUNNEL_DIR" "$TUNNEL_REPO" "$TUNNEL_BRANCH"
@@ -207,7 +253,24 @@ step "Kalico ($KALICO_BRANCH)"
 clone_or_update "$KLIPPER_DIR" "$KALICO_REPO" "$KALICO_BRANCH"
 [ -d "$KLIPPY_ENV" ] || python3 -m venv "$KLIPPY_ENV"
 "$KLIPPY_ENV/bin/pip" install --upgrade pip
-"$KLIPPY_ENV/bin/pip" install -r "$KLIPPER_DIR/scripts/klippy-requirements.txt"
+# Limit source-build workers to fit small SBCs. Use packaged OpenBLAS instead
+# of compiling the large bundled LAPACK fallback that crashed GCC 14 on ARM32.
+numpy_build_settings=" --config-settings=compile-args=-j$NUMPY_BUILD_JOBS"
+numpy_build_settings="$numpy_build_settings --config-settings=setup-args=-Dblas=openblas --config-settings=setup-args=-Dlapack=openblas"
+case $(uname -m) in
+    armv*l)
+        # Avoid the optional NEON dispatch variants that also crashed GCC 14.
+        numpy_build_settings="$numpy_build_settings --config-settings=setup-args=-Dcpu-dispatch=none"
+        ;;
+esac
+klippy_requirements=$(mktemp)
+trap 'rm -f "$klippy_requirements"' 0
+# pip applies build settings to packages from -r only when set per requirement.
+sed "/^numpy[=<>!~]/ s/$/$numpy_build_settings/" \
+    "$KLIPPER_DIR/scripts/klippy-requirements.txt" > "$klippy_requirements"
+"$KLIPPY_ENV/bin/pip" install -r "$klippy_requirements"
+rm -f "$klippy_requirements"
+trap - 0
 cat > "$DATA/systemd/klipper.env" <<EOF
 KLIPPER_ARGS="$KLIPPER_DIR/klippy/klippy.py $CONFIG/printer.cfg -I $DATA/comms/klippy.serial -l $DATA/logs/klippy.log -a $DATA/comms/klippy.sock"
 EOF
