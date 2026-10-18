@@ -170,6 +170,12 @@ managed_services: klipper
 #events: complete, error, cancelled, paused
 #title: OpenCreator
 #body: Print {event_name}: {event_args[1].filename}
+# Door open during a print (needs door notify on: C5_MISC_DOOR_NOTIFY_ON)
+#[notifier door_open]
+#url: tgram://BOT_TOKEN/CHAT_ID
+#events: gcode
+#title: OpenCreator
+#body: {event_message}
 
 # Spool tracking with a Spoolman server. Uncomment and set its address.
 #[spoolman]
