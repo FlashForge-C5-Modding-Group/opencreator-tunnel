@@ -29,6 +29,7 @@ the [update_manager OpenCreator Updater] section in moonraker.conf).
 """
 import os
 import pathlib
+import re
 import shutil
 import subprocess
 import sys
@@ -53,6 +54,19 @@ def log(msg):
 
 def _normalize_newlines(src, dest):
     dest.write_bytes(src.read_bytes().replace(b"\r\n", b"\n"))
+
+
+SAVE_CONFIG_MARKER = re.compile(rb"^#\*# <-* SAVE_CONFIG -*>", re.M)
+
+
+def _drop_save_config(path):
+    # The SAVE_CONFIG block is the printer's own calibration (shaper, PID,
+    # meshes, skew). The template's copy only seeds new installs, so it is
+    # cut from base and template: the live block is then kept as is.
+    data = path.read_bytes()
+    match = SAVE_CONFIG_MARKER.search(data)
+    if match:
+        path.write_bytes(data[:match.start()])
 
 
 def merge_one(name, live_path, base_path, template_path):
@@ -86,6 +100,8 @@ def merge_one(name, live_path, base_path, template_path):
         _normalize_newlines(live_path, work)
         _normalize_newlines(base_path, norm_base)
         _normalize_newlines(template_path, norm_latest)
+        _drop_save_config(norm_base)
+        _drop_save_config(norm_latest)
         result = subprocess.run(
             ["git", "merge-file", "-L", "current", "-L", "base", "-L", "latest",
              str(work), str(norm_base), str(norm_latest)],
