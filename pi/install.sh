@@ -44,7 +44,7 @@ step "System packages"
 sudo apt-get update
 sudo apt-get install --yes git curl unzip nginx python3 python3-venv \
     python3-dev libffi-dev build-essential libncurses-dev libusb-dev \
-    pkg-config
+    pkg-config ffmpeg
 
 step "opencreator-tunnel ($TUNNEL_BRANCH)"
 clone_or_update "$TUNNEL_DIR" "$TUNNEL_REPO" "$TUNNEL_BRANCH"
@@ -183,6 +183,20 @@ ln -sf "$PI/moonraker/opencreator_3mf.py" \
 grep -q '^\[opencreator_3mf\]' "$CONFIG/moonraker.conf" ||
     printf '\n[opencreator_3mf]\n' >> "$CONFIG/moonraker.conf"
 
+step "Timelapse"
+TIMELAPSE_REPO=${TIMELAPSE_REPO:-https://github.com/mainsail-crew/moonraker-timelapse.git}
+clone_or_update "$HOME/moonraker-timelapse" "$TIMELAPSE_REPO" main
+ln -sf "$HOME/moonraker-timelapse/component/timelapse.py" \
+    "$MOONRAKER_DIR/moonraker/components/timelapse.py"
+ln -sf "$HOME/moonraker-timelapse/klipper_macro/timelapse.cfg" "$CONFIG/timelapse.cfg"
+# Frames come from the webcam set up in Fluidd.
+grep -q '^\[timelapse\]' "$CONFIG/moonraker.conf" ||
+    printf '\n[timelapse]\noutput_path: %s/timelapse/\nframe_path: /tmp/timelapse/\nffmpeg_binary_path: /usr/bin/ffmpeg\n' \
+        "$DATA" >> "$CONFIG/moonraker.conf"
+grep -q '^\[update_manager timelapse\]' "$CONFIG/moonraker.conf" ||
+    printf '\n[update_manager timelapse]\ntype: git_repo\nprimary_branch: main\npath: %s/moonraker-timelapse\norigin: %s\nmanaged_services: klipper moonraker\n' \
+        "$HOME" "$TIMELAPSE_REPO" >> "$CONFIG/moonraker.conf"
+
 step "Kalico ($KALICO_BRANCH)"
 clone_or_update "$KLIPPER_DIR" "$KALICO_REPO" "$KALICO_BRANCH"
 [ -d "$KLIPPY_ENV" ] || python3 -m venv "$KLIPPY_ENV"
@@ -236,6 +250,12 @@ for src in $(cd "$PI/config" && find . -type f); do
     copy_missing "$PI/config/$src" "$CONFIG/$src"
 done
 echo "Config: $added files added, $kept existing files kept"
+# The include goes first: the end of printer.cfg is Klipper's SAVE_CONFIG
+# block. A kept printer.cfg lacks it, or has it lower down.
+if [ "$(head -n 1 "$CONFIG/printer.cfg")" != '[include timelapse*.cfg]' ]; then
+    { echo '[include timelapse*.cfg]'; grep -v '^\[include timelapse\*\.cfg\]$' "$CONFIG/printer.cfg"; } \
+        > "$CONFIG/printer.cfg.new" && mv "$CONFIG/printer.cfg.new" "$CONFIG/printer.cfg"
+fi
 # AFC stops with an error while its variables file is missing or empty.
 if [ ! -s "$CONFIG/AFC/AFC.var.unit" ]; then
     mkdir -p "$CONFIG/AFC"
