@@ -107,11 +107,29 @@ if [ "$needs_adopt" -eq 1 ]; then
     say "existing printer.cfg is not OpenCreator; --adopt-config is required to back it up and replace it"
 fi
 if [ "$CHECK" -eq 1 ]; then
+    if [ -s "$KLIPPER/klippy/chelper/c_helper.so" ]; then
+        say "C helper exists; installation will verify it and rebuild if stale"
+    else
+        say "C helper is missing; installation will build it with the KIAUH virtualenv"
+    fi
     say "check only; no files or services changed"
     exit 0
 fi
 [ "$needs_adopt" -eq 0 ] || [ "$ADOPT" -eq 1 ] ||
     fail "rerun with --adopt-config after reviewing your existing printer.cfg"
+
+# Build before changing the configuration or services. Kalico's get_ffi()
+# uses the same source timestamps and compiler flags as a normal Klippy start,
+# then dlopens the result so a broken build fails here instead of at boot.
+command -v gcc >/dev/null 2>&1 ||
+    fail "gcc is required to build c_helper.so (install build-essential)"
+say "building or verifying Kalico C helper"
+PYTHONPATH=$KLIPPER "$KLIPPY_ENV/bin/python" -c \
+    'from klippy import chelper; chelper.get_ffi()' ||
+    fail "C helper build failed; check gcc and the KIAUH virtualenv's cffi package"
+[ -s "$KLIPPER/klippy/chelper/c_helper.so" ] ||
+    fail "C helper build returned without creating c_helper.so"
+say "Kalico C helper ready"
 
 mkdir -p "$CONFIG" "$DATA/logs" "$DATA/comms" "$DATA/gcodes"
 
