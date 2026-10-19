@@ -160,6 +160,42 @@ active tool) and stays by the docks, 1 mm above the old height; like stock,
 the slicer's next moves take the new tool back to the print. A failed grab
 or release stops with an error; there are no automatic retries.
 
+### Filament loading
+
+Insert filament manually until AFC reports the toolhead sensor loaded.
+`C5_PREPARE_LOAD_T0` through `C5_PREPARE_LOAD_T3` select and heat a tool for
+insertion (optional `TEMP=...`, default 220 °C).
+
+`C5_LOAD_FILAMENT LENGTH=20` heats and loads the physically attached tool,
+including when run without parameters from a macro button. The mount sensors
+must report a valid attached tool matching the active extruder; the command
+never selects a tool implicitly. `TEMP=...` sets the loading temperature.
+Without it, a heater target within 150–300 °C is reused; otherwise the loader
+uses 220 °C, never the measured room temperature. It sets the target and waits
+for at least target minus 2 °C before feeding, even if cold extrusion is
+enabled. The screen's “Load Selected Tool” button uses this command;
+“Load Attached Filament” calls the same heating path directly.
+
+For explicit selection, use `C5_LOAD_FILAMENT TOOL=2 TEMP=255 LENGTH=20`,
+or `C5_LOAD_FILAMENT TOOLS=0,2 TEMP0=220 TEMP2=255 LENGTH=20`.
+`TEMP` supplies a common temperature (default 220 °C); `TEMP0` through
+`TEMP3` override it per tool. Explicit loading temperatures must be finite
+and within 150–300 °C. Insert filament into every requested tool first.
+The mounted requested tool is loaded first; a mounted tool not in the list
+must be safely cooled and docked before loading other tools.
+
+An idle load applies the calibrated automatic nozzle Z offset, purges over
+the rear-right bucket, cools at the wiper, turns the heater off, and docks.
+The chosen loading temperature is passed to the existing `C5_COOL_FOR_DOCK`
+command; its `max(0, HOTEND - 100)` cooldown calculation is unchanged.
+During a paused print, loading without `TOOL`/`TOOLS` heats and waits, then
+feeds in place while preserving the paused G-code state. It does not select
+a tool, travel, cool, or dock. Explicit tool selection requires an idle print.
+Existing length limits are unchanged: use `LENGTH=20` for the final purge;
+the attached-tool helper accepts at most 80 mm.
+
+### First-run calibration
+
 First run:
 
 1. Dock positions, for each tool `n` (0-3): `M84`, push the carriage onto
