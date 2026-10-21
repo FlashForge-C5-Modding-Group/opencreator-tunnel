@@ -7,12 +7,18 @@ set -eu
 SKIP_CYTHON=${SKIP_CYTHON:-0}
 VERBOSE=${VERBOSE:-0}
 NUMPY_BUILD_JOBS=${NUMPY_BUILD_JOBS:-2}
+MODEL=${OC_MODEL:-}
+next_model=0
 for option in "$@"; do
+    if [ "$next_model" -eq 1 ]; then MODEL=$option; next_model=0; continue; fi
     case $option in
+        --model) next_model=1 ;;
+        --model=*) MODEL=${option#--model=} ;;
         --skip-cython) SKIP_CYTHON=1 ;;
         -v|--verbose) VERBOSE=1 ;;
         -h|--help)
-            echo "Usage: sh pi/install.sh [--skip-cython] [--verbose]"
+            echo "Usage: sh pi/install.sh [--model creator5|creator5pro] [--skip-cython] [--verbose]"
+            echo "  --model        The printer this Pi is connected to (asked if not given)."
             echo "  --skip-cython  Skip compiling Cython itself; use its Python implementation."
             echo "  -v, --verbose Enable detailed pip and build output."
             exit 0 ;;
@@ -21,6 +27,36 @@ for option in "$@"; do
 done
 
 [ "$(id -u)" -ne 0 ] || { echo "run as your normal user, not root" >&2; exit 1; }
+
+# Which printer the Pi drives: the Creator 5 has no chamber heater, chamber
+# fans or aux fan, so only a Creator 5 Pro gets printer.pro.cfg (through
+# printer.model.cfg, see printer.base.cfg).
+ask_model() {
+    case ${MODEL:-} in
+        creator5|creator5pro|'') ;;
+        *) echo "--model must be creator5 or creator5pro" >&2; exit 2 ;;
+    esac
+    while [ -z "${MODEL:-}" ]; do
+        if ! (: </dev/tty) 2>/dev/null; then
+            echo "No terminal to ask on: pass --model creator5 or --model creator5pro" >&2
+            exit 2
+        fi
+        printf '\nWhich printer is this Pi connected to?\n  1) Creator 5\n  2) Creator 5 Pro\nChoose 1 or 2: ' >/dev/tty
+        read -r answer </dev/tty || exit 2
+        case $answer in
+            1) MODEL=creator5 ;;
+            2) MODEL=creator5pro ;;
+        esac
+    done
+}
+write_model() {  # write_model CONFIG_DIR
+    if [ "$MODEL" = creator5pro ]; then
+        printf '# Written by the OpenCreator installer: Creator 5 Pro\n[include printer.pro.cfg]\n'
+    else
+        printf '# Written by the OpenCreator installer: Creator 5 (no chamber heater, chamber fans or aux fan)\n'
+    fi > "$1/printer.model.cfg"
+}
+ask_model
 
 # This environment option also reaches pip's isolated build environments.
 case $SKIP_CYTHON in
@@ -319,6 +355,8 @@ for src in $(cd "$PI/config" && find . -type f); do
     copy_missing "$PI/config/$src" "$CONFIG/$src"
 done
 echo "Config: $added files added, $kept existing files kept"
+write_model "$CONFIG"
+echo "Printer: $MODEL (printer.model.cfg)"
 # The include goes first: the end of printer.cfg is Klipper's SAVE_CONFIG
 # block. A kept printer.cfg lacks it, or has it lower down.
 if [ "$(head -n 1 "$CONFIG/printer.cfg")" != '[include timelapse*.cfg]' ]; then

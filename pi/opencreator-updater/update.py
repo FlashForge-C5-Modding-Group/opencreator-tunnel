@@ -148,6 +148,24 @@ def sync_configs():
     return results
 
 
+MODEL_FILE = "printer.model.cfg"
+PRO_MODEL = ("# Written by the OpenCreator installer: Creator 5 Pro\n"
+             "[include printer.pro.cfg]\n")
+
+
+def ensure_model_file():
+    # printer.base.cfg only gets the Pro hardware (printer.pro.cfg) through
+    # printer.model.cfg, which the installer writes. Installs from before it
+    # asked had that hardware in printer.base.cfg, so they keep it.
+    path = CONFIG_DIR / MODEL_FILE
+    if path.exists():
+        return False
+    path.write_text(PRO_MODEL)
+    log("%-28s missing: assumed Creator 5 Pro (run the installer again to change)"
+        % (MODEL_FILE,))
+    return True
+
+
 def pull_klipper():
     if not (KLIPPER_DIR / ".git").is_dir():
         log("klipper: %s is not a git checkout, skipping" % (KLIPPER_DIR,))
@@ -192,7 +210,8 @@ def main():
         % (CONFIG_DIR, TEMPLATE_DIR))
     results = sync_configs()
     conflicts = [n for n, r in results.items() if r == "conflict"]
-    config_changed = any(r in ("merged", "new") for r in results.values())
+    config_changed = ensure_model_file()
+    config_changed = any(r in ("merged", "new") for r in results.values()) or config_changed
     klipper_changed = pull_klipper()
     if conflicts and klipper_changed:
         # Conflicted live files were left untouched and still valid, so

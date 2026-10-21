@@ -5,7 +5,9 @@ set -eu
 
 usage() {
     cat <<'EOF'
-Usage: sh pi/install-existing-kiauh.sh [--check] [--adopt-config] [--restart]
+Usage: sh pi/install-existing-kiauh.sh [--model creator5|creator5pro] [--check] [--adopt-config] [--restart]
+
+  --model         The printer this Pi is connected to (asked if not given).
 
   --check         Detect the existing stack and report what would be needed.
   --adopt-config  Back up and replace a non-OpenCreator printer.cfg.
@@ -20,8 +22,13 @@ EOF
 CHECK=0
 ADOPT=0
 RESTART=0
+MODEL=${OC_MODEL:-}
+next_model=0
 for arg in "$@"; do
+    if [ "$next_model" -eq 1 ]; then MODEL=$arg; next_model=0; continue; fi
     case "$arg" in
+        --model) next_model=1 ;;
+        --model=*) MODEL=${arg#--model=} ;;
         --check) CHECK=1 ;;
         --adopt-config) ADOPT=1 ;;
         --restart) RESTART=1 ;;
@@ -34,6 +41,36 @@ fail() { echo "opencreator-kiauh: $*" >&2; exit 1; }
 say() { printf 'opencreator-kiauh: %s\n' "$*"; }
 
 [ "$(id -u)" -ne 0 ] || fail "run as the normal KIAUH user, not root"
+
+# Which printer the Pi drives: the Creator 5 has no chamber heater, chamber
+# fans or aux fan, so only a Creator 5 Pro gets printer.pro.cfg (through
+# printer.model.cfg, see printer.base.cfg).
+ask_model() {
+    case ${MODEL:-} in
+        creator5|creator5pro|'') ;;
+        *) echo "--model must be creator5 or creator5pro" >&2; exit 2 ;;
+    esac
+    while [ -z "${MODEL:-}" ]; do
+        if ! (: </dev/tty) 2>/dev/null; then
+            echo "No terminal to ask on: pass --model creator5 or --model creator5pro" >&2
+            exit 2
+        fi
+        printf '\nWhich printer is this Pi connected to?\n  1) Creator 5\n  2) Creator 5 Pro\nChoose 1 or 2: ' >/dev/tty
+        read -r answer </dev/tty || exit 2
+        case $answer in
+            1) MODEL=creator5 ;;
+            2) MODEL=creator5pro ;;
+        esac
+    done
+}
+write_model() {  # write_model CONFIG_DIR
+    if [ "$MODEL" = creator5pro ]; then
+        printf '# Written by the OpenCreator installer: Creator 5 Pro\n[include printer.pro.cfg]\n'
+    else
+        printf '# Written by the OpenCreator installer: Creator 5 (no chamber heater, chamber fans or aux fan)\n'
+    fi > "$1/printer.model.cfg"
+}
+[ "$CHECK" -eq 1 ] || ask_model
 [ "$(uname -s)" = Linux ] || fail "this installer requires Linux"
 for cmd in systemctl sudo git find cp mkdir grep ln readlink mktemp; do
     command -v "$cmd" >/dev/null 2>&1 || fail "missing command: $cmd"
@@ -164,6 +201,9 @@ elif [ "$needs_adopt" -eq 1 ]; then
 else
     say "kept existing OpenCreator printer.cfg"
 fi
+
+write_model "$CONFIG"
+say "printer: $MODEL (printer.model.cfg)"
 
 # AFC PREP expects this JSON file to exist before Klipper starts.
 if [ ! -s "$CONFIG/AFC/AFC.var.unit" ]; then

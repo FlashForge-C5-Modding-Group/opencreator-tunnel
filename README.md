@@ -79,6 +79,12 @@ As your normal user (not root):
 curl -fsSL https://raw.githubusercontent.com/FlashForge-C5-Modding-Group/opencreator-tunnel/main/pi/install.sh | sh
 ```
 
+It first asks which printer the Pi is connected to, Creator 5 or Creator 5 Pro. To skip the question, add
+`sh -s -- --model creator5` or `--model creator5pro`; `pi/install-existing-kiauh.sh` takes the same option. The
+answer goes in `printer.model.cfg`: only a Creator 5 Pro gets the chamber heater and the chamber and aux fans
+(`printer.pro.cfg`). Run the installer again to change it. If the file is missing, the updater writes the Pro version,
+so installs from before the question keep the hardware they had.
+
 `pi/install.sh` downloads and installs, in order:
 
 1. **This repo** into `~/opencreator-tunnel`.
