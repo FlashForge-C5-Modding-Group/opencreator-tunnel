@@ -166,6 +166,11 @@ active tool) and stays by the docks, 1 mm above the old height; like stock,
 the slicer's next moves take the new tool back to the print. A failed grab
 or release stops with an error; there are no automatic retries.
 
+`C5_PRINT_STOP` uses fresh mount sensors to unselect an attached tool through
+AFC. An empty shuttle is a safe no-op; a head that differs from the selected
+extruder is docked directly. Invalid mount sensors stop cleanup after heaters
+and fans are off, before docking or lowering the bed.
+
 ### Filament loading
 
 Insert filament manually until AFC reports the toolhead sensor loaded.
