@@ -295,6 +295,14 @@ has no macro layout yet.
 
 ## OpenCreator Updater
 
+`update.py` runs `opencreator_updater.py`, the same updater the printer SoC uses
+(opencreator-fs keeps the original; `tests/test_updater_copy.py` checks the copy
+matches). It merges `pi/config` template updates into `~/printer_data/config`,
+keeping your edits and the `SAVE_CONFIG` calibration; a conflict leaves the live
+file untouched and puts the merge attempt beside it as `<file>.conflict`. Then it
+pulls Klipper and restarts it once nothing is printing. How the merge works:
+opencreator-fs's `config-docs/UPDATER.md`.
+
 `pi/opencreator-updater/install.sh` sets up the updater for the checkout it
 is in, wherever that is and whichever user runs it: `opencreator-updater.service`,
 the `moonraker.asvc` entry and the `[update_manager opencreator-updater]`
