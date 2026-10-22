@@ -94,7 +94,7 @@ so installs from before the question keep the hardware they had.
 
 Then it sets up the printer:
 
-5. **Config**: if `printer.cfg` doesn't exist yet, it copies in `pi/config` plus the Kalico overlay (`printer.motor.cfg`, `printer.kalico_mpc.cfg`). An existing config is left alone.
+5. **Config**: if `printer.cfg` doesn't exist yet, it copies in `pi/config` plus `pi/kalico/printer.kalico_mpc.cfg`. An existing config is left alone.
 6. **Updater**: installs the OpenCreator updater service.
 7. **Tunnel**: runs `setup-gadget.sh` and starts the services. On a first install, reboot so the USB gadget comes up; Klipper starts after it.
 

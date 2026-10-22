@@ -180,8 +180,8 @@ copy_missing() {
     say "added $dest"
 }
 
-# Kalico-specific config wins over the generic template on first install.
-for name in printer.motor.cfg printer.kalico_mpc.cfg; do
+# Kalico-only config, copied ahead of the generic template on first install.
+for name in printer.kalico_mpc.cfg; do
     copy_missing "$PI/kalico/$name" "$CONFIG/$name"
 done
 find "$PI/config" -type f | while IFS= read -r src; do

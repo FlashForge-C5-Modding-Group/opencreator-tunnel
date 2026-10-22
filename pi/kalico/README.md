@@ -1,9 +1,7 @@
-# Kalico config overlay for the tunneled Pi
+# Kalico notes for the tunneled Pi
 
-Copy the normal `pi/config` tree to the Pi's `~/printer_data/config/`, then
-copy `pi/kalico/printer.motor.cfg` over its `printer.motor.cfg`. Restart
-Klipper after replacing the file. This overlay is for Kalico; it does not
-change the base `pi/config` files.
+Every install runs Kalico, so `pi/config` (including `printer.motor.cfg`) is
+written for it; this folder only holds `printer.kalico_mpc.cfg`.
 
 The tunneled printer.cfg sets `pressure_advance_smooth_time: 0.06` on all
 four logical extruders. The shared eboard step pin has about 1086 steps/mm
@@ -15,7 +13,7 @@ so inspect print quality and retune PA if needed. A slicer command that
 explicitly sets `SMOOTH_TIME` will override this setting.
 
 The Kalico `MANUAL_STEPPER` parser requires an integer for
-`STOP_ON_ENDSTOP`. The unlock macro therefore uses `STOP_ON_ENDSTOP=1`,
+`STOP_ON_ENDSTOP`. The unlock macro in `printer.motor.cfg` therefore uses `STOP_ON_ENDSTOP=1`,
 which stops on the gear-stepper endstop and requires it to trigger.
 The old `SYNC=0` was removed from that command because Kalico's homing
 branch does not use `SYNC`; it waits for the endstop move to finish.
@@ -28,7 +26,7 @@ here because those movements protect the attached tool and nozzle.
 
 ## MPC hotend control
 
-Also copy `pi/kalico/printer.kalico_mpc.cfg` into `~/printer_data/config/`.
+Copy `pi/kalico/printer.kalico_mpc.cfg` into `~/printer_data/config/`.
 It switches `[extruder]`–`[extruder3]` to `control: mpc` (`heater_power: 50`)
 and is picked up by
 `[include printer.kalico_mpc*.cfg]` (a no-op on stock Klipper, where the file

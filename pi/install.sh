@@ -347,8 +347,8 @@ copy_missing() {  # copy_missing SRC_FILE DEST_FILE
         added=$((added + 1))
     fi
 }
-# Kalico's motor/MPC files replace the generic ones, so they go first.
-for f in printer.motor.cfg printer.kalico_mpc.cfg; do
+# Kalico's MPC file goes first.
+for f in printer.kalico_mpc.cfg; do
     copy_missing "$PI/kalico/$f" "$CONFIG/$f"
 done
 for src in $(cd "$PI/config" && find . -type f); do
