@@ -115,6 +115,44 @@ class PrintStartFilamentTests(unittest.TestCase):
         self.assertIn("T3", messages[0])
 
 
+class PrintStartMaterialTests(unittest.TestCase):
+    def test_all_tool_materials_leave_physical_preparation_on_selected_tool(self):
+        output = macro_template(CONFIG, "_OC_PRINT_START_REST").render(
+            printer={
+                "output_pin flow_calibration": {"value": 1.},
+                "output_pin purge": {"value": 1.},
+                "output_pin bed_leveling": {"value": 0.},
+                "bed_mesh": {"profiles": {}},
+                "creator5_toolchanger": {"build_plate_detected": True},
+            },
+            params={"TOOL": "0", "HOTEND": "220",
+                    "MATERIAL0": "PLA", "MATERIAL1": "PETG",
+                    "MATERIAL2": "ABS", "MATERIAL3": "UNKNOWN"})
+        commands = [line.strip() for line in output.splitlines()
+                    if line.strip() and not line.strip().startswith("#")]
+        self.assertEqual(
+            [line for line in commands if line.startswith("_SET_MPC_MATERIAL")],
+            ['_SET_MPC_MATERIAL TOOL=0 MATERIAL="PLA"',
+             '_SET_MPC_MATERIAL TOOL=1 MATERIAL="PETG"',
+             '_SET_MPC_MATERIAL TOOL=2 MATERIAL="ABS"',
+             '_SET_MPC_MATERIAL TOOL=3 MATERIAL="UNKNOWN"'])
+        self.assertEqual(
+            [line for line in commands
+             if line.startswith("SET_HEATER_TEMPERATURE")],
+            ["SET_HEATER_TEMPERATURE HEATER=extruder TARGET=100.0",
+             "SET_HEATER_TEMPERATURE HEATER=extruder TARGET=220.0",
+             "SET_HEATER_TEMPERATURE HEATER=extruder TARGET=220.0"])
+        self.assertEqual(
+            [line for line in commands if line.startswith("AFC_SELECT_TOOL")],
+            ["AFC_SELECT_TOOL TOOL=extruder", "AFC_SELECT_TOOL TOOL=extruder"])
+        self.assertEqual(
+            [line for line in commands if line.startswith("C5_AUTO_NOZZLE_Z")],
+            ["C5_AUTO_NOZZLE_Z T=0 HOTEND=220.0 BED=0.0 FIRST_LAYER_HEIGHT=0.2",
+             "C5_AUTO_NOZZLE_Z T=0 HOTEND=220.0 BED=0.0 FIRST_LAYER_HEIGHT=0.2"])
+        self.assertEqual(commands.count("C5_FLOW_CALIBRATION"), 1)
+        self.assertEqual(commands.count("C5_TOOL_PURGE"), 1)
+
+
 def render_runout(name, tool, sensors, temp=220):
     printer = {
         "gcode_macro C5_FILAMENT_RUNOUT": {
