@@ -39,12 +39,14 @@ are commented out in `pi/config/printer.cfg`). Keep them after
    `C5_MPC_CALIBRATE TOOL=n`. `TARGET=` defaults to 250 °C; calibration saves
    once at the end unless `SAVE=0`.
 
-Updated shared Kalico passes Orca material metadata for the initial tool
-on automatic virtual-SD start, without Orca edits. MPC must be enabled and
-calibrated first; missing/unknown materials use configured defaults, not
-filament sensing. Explicit `C5_PRINT_START` in the header bypasses automatic
-start/material injection; multi-tool preparation still needs `TOOLS=` and
-materials. See the canonical
+Update both Kalico and the config macros for automatic virtual-SD startup
+to set Orca material properties for **all four tools**, including later tool
+changes, without Orca edits. MPC must be enabled and calibrated first.
+Missing/unknown materials restore configured defaults; this is not filament
+sensing. Material setup does not select, heat or purge extra tools:
+`TOOL`/`TOOLS` still control physical startup preparation independently.
+An explicit `C5_PRINT_START` in the header bypasses automatic start/material
+injection and owns its material arguments. See the canonical
 [`MPC guide`](../../../opencreator-fs/config-docs/CREATOR5_MPC.md)
 for bounded header/trailer handling, manual material parameters, calibration,
 temperature waits and PID rollback.
