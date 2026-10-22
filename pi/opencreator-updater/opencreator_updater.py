@@ -504,6 +504,7 @@ class SocUpdater(Updater):
             self.restart_klipper(changed, conflicts)
 
     def watch(self):
+        self.log("watching %s (checks every 60 s)" % self.repo)
         for _ in range(120):                    # Moonraker up, so a restart can reach it
             try:
                 self.api("/server/info", timeout=5)
