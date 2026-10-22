@@ -51,6 +51,7 @@ injection and owns its material arguments. See the canonical
 for bounded header/trailer handling, manual material parameters, calibration,
 temperature waits and PID rollback.
 
-The tunnel uses the same expanded material table as native; see
-[Material defaults](../../../opencreator-fs/config-docs/CREATOR5_MPC.md#material-defaults)
-for representative density sources and the explicitly estimated heat capacities.
+Native and tunneled installations use the same material defaults. See the
+[complete defaults table](../../../opencreator-fs/config-docs/CREATOR5_MPC.md#material-defaults)
+for every supported material's density and heat capacity, estimate caveats
+and source references.
