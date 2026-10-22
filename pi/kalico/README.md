@@ -26,19 +26,25 @@ here because those movements protect the attached tool and nozzle.
 
 ## MPC hotend control
 
-Copy `pi/kalico/printer.kalico_mpc.cfg` into `~/printer_data/config/`.
-It switches `[extruder]`–`[extruder3]` to `control: mpc` (`heater_power: 50`)
-and is picked up by
-`[include printer.kalico_mpc*.cfg]` (a no-op on stock Klipper, where the file
-must not be installed). Then:
+MPC is opt-in and Kalico-only. In the copied `printer.cfg`, uncomment
+`[include printer.mpc.cfg]` and `[include printer.kalico_mpc*.cfg]` (both
+are commented out in `pi/config/printer.cfg`). Keep them after
+`printer.base.cfg`, which includes `AFC/AFC.cfg`, to wrap AFC's `M109`.
 
-1. In the `SAVE_CONFIG` block of `printer.cfg`, delete the `control = pid`
-   line under each of `[extruder]`–`[extruder3]`, since saved values override
-   included files.
-2. Restart and run `C5_MPC_CALIBRATE` (or `C5_MPC_CALIBRATE TOOL=n`).
+1. Copy `pi/kalico/printer.kalico_mpc.cfg` into `~/printer_data/config/`;
+   it enables MPC on all four hotends. Never install it on stock Klipper.
+2. Remove each extruder's `control = pid` from `printer.cfg`'s `SAVE_CONFIG`
+   block, since saved values override includes.
+3. Restart and run `C5_MPC_CALIBRATE` (all tools) or
+   `C5_MPC_CALIBRATE TOOL=n`. `TARGET=` defaults to 250 °C; calibration saves
+   once at the end unless `SAVE=0`.
 
-`printer.mpc.cfg` (in the normal config tree) adds MPC-aware `M109`/`M190`,
-`_SET_MPC_MATERIAL`, and `MATERIAL=`/`MATERIAL0..3=` support in
-`C5_PRINT_START`. All of it checks for Kalico and `control: mpc` at runtime
-and falls back to stock behaviour otherwise. Details are in
-`opencreator-fs/config-docs/CREATOR5_MPC.md`.
+Updated shared Kalico passes Orca material metadata for the initial tool
+on automatic virtual-SD start, without Orca edits. MPC must be enabled and
+calibrated first; missing/unknown materials use configured defaults, not
+filament sensing. Explicit `C5_PRINT_START` in the header bypasses automatic
+start/material injection; multi-tool preparation still needs `TOOLS=` and
+materials. See the canonical
+[`MPC guide`](../../../opencreator-fs/config-docs/CREATOR5_MPC.md)
+for bounded header/trailer handling, manual material parameters, calibration,
+temperature waits and PID rollback.
