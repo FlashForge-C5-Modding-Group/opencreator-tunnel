@@ -1,0 +1,13 @@
+/dts-v1/;
+/plugin/;
+
+/ {
+    compatible = "rockchip,rk3328";
+
+    fragment@0 {
+        target-path = "/usb@ff580000";
+        __overlay__ {
+            g-tx-fifo-size = <128 128 128 128 128 16>;
+        };
+    };
+};

@@ -29,6 +29,14 @@ calibrations and touchscreen streaming are later phases.
 - An SBC with a USB device (OTG) port. Tested target: Raspberry Pi Zero 2 W
   (use the port labelled `USB`, not `PWR`). Any board exposing an entry in
   `/sys/class/udc` in peripheral mode works.
+- Armbian on RK3328 (use the USB 2.0 OTG port): `setup-gadget.sh` installs two
+  overlays from `pi/overlays/` into `/boot/overlay-user` and adds them to
+  `user_overlays=` in `/boot/armbianEnv.txt`. One switches the OTG port from
+  host to peripheral (the stock device tree leaves `/sys/class/udc` empty). The
+  other resizes its TX FIFOs to `128 128 128 128 128 16`: the stock layout
+  only fits 3 high-speed serial ports, and the rest fail with `No suitable fifo
+  found` once the printer connects. Reboot afterwards; the overlays survive
+  kernel updates.
 - A USB cable from the SBC's device port to the USB-A port on the side of
   the printer. A Pi Zero 2 W can be powered from that port. Other SBCs must
   be powered separately and connected with a data-only (power-blocked)
