@@ -306,19 +306,16 @@ class Updater:
         if head:
             write_atomic(self.applied, (head + "\n").encode())
 
-    def restart_klipper(self, changed, conflicts, service=False):
+    def restart_klipper(self, conflicts):
+        # Always the service, so updated Klipper code is loaded too. Conflicted
+        # files are left as they were, so they still load.
         if conflicts:
             self.log("CONFLICTS in: %s -- resolve by hand, then restart Klipper" % " ".join(conflicts))
-            return
-        if not changed:
-            self.log("nothing changed")
-            return
         while self.printing():
             time.sleep(60)
-        path = "/machine/services/restart?service=klipper" if service else "/printer/restart"
         try:
-            self.api(path, "POST")
-            self.log("klipper %s requested via Moonraker" % ("service restart" if service else "restart"))
+            self.api("/machine/services/restart?service=klipper", "POST")
+            self.log("klipper service restart requested via Moonraker")
         except Exception as e:
             self.log("klipper restart request failed (%s); restart it yourself" % e)
 
@@ -513,12 +510,12 @@ class SocUpdater(Updater):
             return
         self.log("applying opencreator-fs %s" % head)
         try:
-            changed, conflicts = self.merge_configs(self.repo / self.template_rel)
+            _, conflicts = self.merge_configs(self.repo / self.template_rel)
             self.record_success(conflicts, head)
         finally:
             self.cleanup()
         if restart:
-            self.restart_klipper(changed, conflicts)
+            self.restart_klipper(conflicts)
 
     # ---- MCU firmware -----------------------------------------------------------
     def mcu_firmware(self):
@@ -675,16 +672,13 @@ class PiUpdater(Updater):
         except UpdateError:
             head = None
         try:
-            changed, conflicts = self.merge_configs(self.repo / self.template_rel)
+            _, conflicts = self.merge_configs(self.repo / self.template_rel)
             self.record_success(conflicts, head)
         finally:
             self.cleanup()
-        code = self.pull_klipper()
+        self.pull_klipper()
         if restart:
-            if conflicts and code:
-                # the conflicted files are untouched and still valid: load the new code
-                self.restart_klipper(True, [], service=True)
-            self.restart_klipper(changed or code, conflicts, service=code)
+            self.restart_klipper(conflicts)
         return 1 if conflicts else 0
 
 
