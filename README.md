@@ -313,8 +313,8 @@ has no macro layout yet.
 matches). It merges `pi/config` template updates into `~/printer_data/config`,
 keeping your edits and the `SAVE_CONFIG` calibration; a conflict leaves the live
 file untouched and puts the merge attempt beside it as `<file>.conflict`. Then it
-pulls Klipper and restarts the Klipper service once nothing is printing, after
-every update. How the merge works:
+pulls Klipper. It doesn't restart Klipper; restart it yourself after an update.
+How the merge works:
 opencreator-fs's `config-docs/UPDATER.md`.
 
 `pi/opencreator-updater/install.sh` sets up the updater for the checkout it
