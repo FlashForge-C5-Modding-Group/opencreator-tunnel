@@ -47,6 +47,50 @@ MCU_FIRMWARE_DIR = "mcu-firmware"
 MCU_BOARDS = {"eBoard.hex": "mcu eboard", "heaterBoard.hex": "mcu eheaterboard",
               "levelBoard.hex": "mcu levelboard", "mainBoardGD.hex": "mcu"}
 MCU_FLASH_TIMEOUT = 900
+STOCK_CONTROL = Path("/usr/prog/PROGRAM/control")
+# A failed live flash is handed to startup.sh, which runs this at power-on
+# while the boards still sit in their bootloader.
+BOOT_FLASH_SH = r"""#!/bin/sh
+# Written by the OpenCreator updater after a live MCU flash failed.
+DIR=/usr/data/opencreator/mcu-flash-pending
+LOG=/usr/data/logs/oc-mcu-flash-pending.log
+say() { echo "$(date '+%F %T') $*" >> "$LOG"; }
+# Three boots at most, so a board that never takes it can't stall every start.
+tries=$(cat "$DIR/tries" 2>/dev/null || echo 0)
+if [ "$tries" -ge 3 ]; then
+    say "gave up after 3 boots; the files are kept in $DIR"
+    mv "$DIR/flash.sh" "$DIR/flash.sh.failed"
+    exit 0
+fi
+echo $((tries + 1)) > "$DIR/tries"
+cd "$DIR" || exit 0
+say "flashing the MCUs from the updater (boot $((tries + 1)) of 3)"
+if command -v sha256sum > /dev/null && ! sha256sum -c SHA256SUMS >> "$LOG" 2>&1; then
+    say "firmware files failed the checksum; not flashing"
+    mv flash.sh flash.sh.failed
+    exit 0
+fi
+failed=0
+for b in eBoard.hex:/dev/ttyS5 heaterBoard.hex:/dev/ttyS4 levelBoard.hex:/dev/ttyS7 mainBoardGD.hex:/dev/ttyS2; do
+    hex=${b%%:*} tty=${b#*:}
+    [ -f "$hex" ] || continue
+    ok=
+    for i in 1 2 3; do
+        if [ "$hex" = mainBoardGD.hex ]; then
+            ./ISPCommand "$hex" "$tty" 115200 > /tmp/oc-mcu-flash.log 2>&1
+        else
+            ./IAPCommand "$hex" "$tty" > /tmp/oc-mcu-flash.log 2>&1
+        fi
+        cat /tmp/oc-mcu-flash.log >> "$LOG"
+        grep -qE "STM32Write: success|sendFileSuccessful|finished successfully" /tmp/oc-mcu-flash.log && { ok=1; break; }
+    done
+    if [ -n "$ok" ]; then say "$hex flashed"; else say "$hex FAILED"; failed=1; fi
+done
+if [ "$failed" = 0 ]; then
+    cd / && rm -rf "$DIR"
+    say "all MCUs flashed"
+fi
+"""
 
 MODEL_FILE = "printer.model.cfg"
 PRO_MODEL = "%s: Creator 5 Pro\n[include printer.pro.cfg]\n"
@@ -111,6 +155,7 @@ class Updater:
         self.out = out
         self._history = None      # (repo path, complete?) once looked up this run
         self._work = None
+        self._restarted_for = None  # a conflicted commit is re-merged every minute
 
     # ---- plumbing -------------------------------------------------------------
     def log(self, msg):
@@ -311,13 +356,15 @@ class Updater:
         # files are left as they were, so they still load.
         if conflicts:
             self.log("CONFLICTS in: %s -- resolve by hand, then restart Klipper" % " ".join(conflicts))
-        while self.printing():
-            time.sleep(60)
-        try:
-            self.api("/machine/services/restart?service=klipper", "POST")
-            self.log("klipper service restart requested via Moonraker")
-        except Exception as e:
-            self.log("klipper restart request failed (%s); restart it yourself" % e)
+        self.log("update applied; restart Klipper to load it")
+        # Klipper is not restarted automatically for now.
+        # while self.printing():
+        #     time.sleep(60)
+        # try:
+        #     self.api("/machine/services/restart?service=klipper", "POST")
+        #     self.log("klipper service restart requested via Moonraker")
+        # except Exception as e:
+        #     self.log("klipper restart request failed (%s); restart it yourself" % e)
 
     def cleanup(self):
         if self._work:
@@ -390,6 +437,7 @@ class SocUpdater(Updater):
         self.loopscript_applied = self.ocdir / ".loopscript-commit"
         self.nginx = NGINX_CONF_D
         self.firmware_exe = FIRMWARE_EXE
+        self.control = STOCK_CONTROL
 
     def ensure_clone(self) -> bool:
         if (self.repo / ".git").is_dir():
@@ -487,14 +535,15 @@ class SocUpdater(Updater):
         if path.is_file():
             os.chmod(str(path), mode)
 
-    def apply(self, restart=True, loopscript=True):
+    def apply(self, restart=True, loopscript=True) -> bool:
+        """False when something failed, so the MCUs are left alone this time."""
         if not self.ensure_clone():
-            return
+            return False
         try:
             head = self.head()
         except UpdateError as e:
             self.log("can't read the opencreator-fs checkout: %s" % e)
-            return
+            return False
         if loopscript:
             recorded = self._read(self.loopscript_applied)
             if not recorded:
@@ -507,15 +556,17 @@ class SocUpdater(Updater):
                 self.sync_loopscript()
                 write_atomic(self.loopscript_applied, (head + "\n").encode())
         if self._read(self.applied) == head and self._read(self.merge_version) == MERGE_VERSION:
-            return
+            return True
         self.log("applying opencreator-fs %s" % head)
         try:
-            _, conflicts = self.merge_configs(self.repo / self.template_rel)
+            changed, conflicts = self.merge_configs(self.repo / self.template_rel)
             self.record_success(conflicts, head)
         finally:
             self.cleanup()
-        if restart:
+        if restart and (changed or self._restarted_for != head):
+            self._restarted_for = head
             self.restart_klipper(conflicts)
+        return not conflicts
 
     # ---- MCU firmware -----------------------------------------------------------
     def mcu_firmware(self):
@@ -604,12 +655,34 @@ class SocUpdater(Updater):
             return
         write_atomic(failed, (attempt + "\n").encode())
         last = output.strip().splitlines()[-1] if output.strip() else "no output"
-        self.log("MCU firmware: flashing failed (%s); not retried until the files change" % last)
+        self.log("MCU firmware: flashing failed (%s); not retried live until the files change" % last)
+        self.stage_boot_flash([n for n in todo if n not in done], wanted)
         try:
             self.api("/printer/gcode/script", "POST", {"script": 'RESPOND TYPE=error MSG="OpenCreator: '
                      'MCU firmware update failed; see %s"' % (self.log_path or "the updater log")})
         except Exception:
             pass
+
+    def stage_boot_flash(self, names, wanted):
+        """Leave the boards that failed for startup.sh to flash at the next
+        power-on. An installer's pending flash is left as it is."""
+        pending = self.ocdir / "mcu-flash-pending"
+        if not names or (pending / "flash.sh").exists():
+            return
+        controls = sorted(self.control.glob("[0-9]*")) if self.control.is_dir() else []
+        tools = [controls[-1] / t for t in ("IAPCommand", "ISPCommand")] if controls else []
+        if not tools or not all(t.is_file() for t in tools):
+            self.log("MCU firmware: no IAPCommand/ISPCommand under %s; not staged for startup" % self.control)
+            return
+        shutil.rmtree(str(pending), ignore_errors=True)
+        pending.mkdir(parents=True)
+        for path in [self.repo / MCU_FIRMWARE_DIR / n for n in names] + tools:
+            shutil.copy2(str(path), str(pending / path.name))
+            os.chmod(str(pending / path.name), 0o755 if path in tools else 0o644)
+        write_atomic(pending / "SHA256SUMS",
+                     "".join("%s  %s\n" % (wanted[n], n) for n in sorted(names)).encode())
+        write_atomic(pending / "flash.sh", BOOT_FLASH_SH.encode(), 0o755)
+        self.log("MCU firmware: %s staged for flashing at the next power-on" % ", ".join(names))
 
     def _save_flashed(self, record: Path, flashed: dict):
         self.state.mkdir(parents=True, exist_ok=True)
@@ -625,11 +698,13 @@ class SocUpdater(Updater):
                 time.sleep(5)
         while True:
             try:
-                self.apply()
+                ok = self.apply()
             except Exception as e:              # keep watching whatever happens
                 self.log("update failed: %s" % e)
+                ok = False
             try:
-                self.sync_mcu()
+                if ok:
+                    self.sync_mcu()
             except Exception as e:
                 self.log("MCU firmware update failed: %s" % e)
             time.sleep(60)
@@ -699,8 +774,8 @@ def main(argv=None):
     u = SocUpdater(config_dir=Path(a.config_dir) if a.config_dir else SOC_CONFIG,
                    clone=Path(a.repo) if a.repo else SOC_CLONE, **kw)
     if a.once or a.config_dir:
-        u.apply(restart=not a.no_restart, loopscript=not a.no_loopscript and not a.config_dir)
-        if not a.config_dir and not a.no_mcu:
+        ok = u.apply(restart=not a.no_restart, loopscript=not a.no_loopscript and not a.config_dir)
+        if ok and not a.config_dir and not a.no_mcu:
             u.sync_mcu()
         return 0
     u.watch()
