@@ -156,6 +156,8 @@ class Updater:
         self._history = None      # (repo path, complete?) once looked up this run
         self._work = None
         self._restarted_for = None  # a conflicted commit is re-merged every minute
+        self._conflicted = None     # (head, config state) of the last conflicted merge
+        self._transient = False
 
     # ---- plumbing -------------------------------------------------------------
     def log(self, msg):
@@ -244,6 +246,7 @@ class Updater:
             return (0, found) if found is not None else (1, None)
         except (UpdateError, OSError) as e:
             self.log("%s: history lookup failed: %s" % (name, e))
+            self._transient = True
             return 2, None
 
     def _workdir(self):
@@ -306,7 +309,8 @@ class Updater:
                     else:
                         conflicts.append(name)
                         self.log("%s: CONFLICT -- no safe historical baseline (lookup status %d); "
-                                 "leaving live and base untouched" % (name, status))
+                                 "leaving live and base untouched; the new template is %s"
+                                 % (name, status, template))
                         continue
                 rc, merged = self.merge3(live_data.replace(b"\r", b""), normalize(merge_base), tmpl_n)
                 conflict_file = live.with_name(live.name + ".conflict")
@@ -530,6 +534,17 @@ class SocUpdater(Updater):
                 pass
         return changed
 
+    def config_state(self):
+        """What a conflicted merge depends on: the live configs and their bases."""
+        state = []
+        for p in sorted(self.config.rglob("*.cfg")):    # the bases are under it too
+            try:
+                st = p.stat()
+                state.append((str(p), st.st_size, st.st_mtime_ns))
+            except OSError:
+                pass
+        return tuple(state)
+
     @staticmethod
     def _chmod(path: Path, mode):
         if path.is_file():
@@ -557,12 +572,16 @@ class SocUpdater(Updater):
                 write_atomic(self.loopscript_applied, (head + "\n").encode())
         if self._read(self.applied) == head and self._read(self.merge_version) == MERGE_VERSION:
             return True
+        if self._conflicted == (head, self.config_state()):
+            return False
         self.log("applying opencreator-fs %s" % head)
+        self._transient = False
         try:
             changed, conflicts = self.merge_configs(self.repo / self.template_rel)
             self.record_success(conflicts, head)
         finally:
             self.cleanup()
+        self._conflicted = (head, self.config_state()) if conflicts and not self._transient else None
         if restart and (changed or self._restarted_for != head):
             self._restarted_for = head
             self.restart_klipper(conflicts)
