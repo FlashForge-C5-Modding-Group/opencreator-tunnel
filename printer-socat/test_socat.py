@@ -35,6 +35,114 @@ class GadgetBindingTest(unittest.TestCase):
             c5_socat.LOG_FILE = original_log_file
 
 
+class UsbfsTest(unittest.TestCase):
+    def test_ioctl_numbers(self):
+        # Values from linux/usbdevice_fs.h as built on each architecture
+        generic = {("r", 15, 4): 0x8004550F, ("", 22, 0): 0x5516,
+                   ("rw", 2, 16): 0xC0105502, ("rw", 18, 12): 0xC00C5512}
+        mips = {("r", 15, 4): 0x4004550F, ("", 22, 0): 0x20005516,
+                ("rw", 2, 16): 0xC0105502, ("rw", 18, 12): 0xC00C5512}
+        for args, value in generic.items():
+            self.assertEqual(c5_socat._ioc(*args, mips=False), value, args)
+        for args, value in mips.items():
+            self.assertEqual(c5_socat._ioc(*args, mips=True), value, args)
+
+    def make_sysfs(self, root, ports=5):
+        def put(path, **files):
+            os.makedirs(path, exist_ok=True)
+            for name, value in files.items():
+                with open(os.path.join(path, name), "w") as f:
+                    f.write(value + "\n")
+        put(os.path.join(root, "usb1"), idVendor="1d6b", idProduct="0002",
+            busnum="1", devnum="1")
+        put(os.path.join(root, "1-1.2"), idVendor="05a3", idProduct="9230",
+            busnum="1", devnum="3")
+        put(os.path.join(root, "1-1.3"), idVendor="1d6b", idProduct="0104",
+            busnum="1", devnum="7", dev="189:6")
+        for n in range(ports):
+            iface = os.path.join(root, "1-1.3:1.%d" % n)
+            put(iface, bInterfaceNumber="%02x" % n)
+            put(os.path.join(iface, "ep_%02x" % (0x81 + n)), type="Bulk",
+                bEndpointAddress="%02x" % (0x81 + n), wMaxPacketSize="0200")
+            put(os.path.join(iface, "ep_%02x" % (0x01 + n)), type="Bulk",
+                bEndpointAddress="%02x" % (0x01 + n), wMaxPacketSize="0200")
+
+    def test_finds_gadget_and_its_five_ports(self):
+        with tempfile.TemporaryDirectory() as root:
+            self.make_sysfs(root)
+            self.assertEqual(c5_socat.find_gadget(root), ("1-1.3", 1, 7))
+            ifaces = c5_socat.gadget_interfaces("1-1.3", root)
+            self.assertEqual(sorted(ifaces), ["1.0", "1.1", "1.2", "1.3", "1.4"])
+            self.assertEqual(ifaces["1.4"], (4, 0x85, 0x05, 512))
+
+    def test_link_moves_data_both_ways_on_every_port(self):
+        """UsbfsLink against a simulated device: bytes the SBC sends on each
+        bulk IN endpoint come out of that port's pty, and bytes written to
+        the pty go out of its bulk OUT endpoint."""
+        import ctypes, errno, queue, threading
+        inbound = {0x81 + n: queue.Queue() for n in range(5)}
+        sent = {0x01 + n: bytearray() for n in range(5)}
+        claimed, lock = set(), threading.Lock()
+
+        def fake_ioctl(fd, request, arg):
+            obj = arg._obj if hasattr(arg, "_obj") else None
+            if request == c5_socat.USBDEVFS_CLAIMINTERFACE:
+                claimed.add(obj.value)
+                return 0
+            if request == c5_socat.USBDEVFS_RELEASEINTERFACE:
+                claimed.discard(obj.value)
+                return 0
+            if request == c5_socat.USBDEVFS_IOCTL:
+                raise OSError(errno.ENODATA, "no driver")
+            if request == c5_socat.USBDEVFS_BULK:
+                if obj.ep & 0x80:
+                    try:
+                        data = inbound[obj.ep].get(timeout=0.05)
+                    except queue.Empty:
+                        raise OSError(errno.ETIMEDOUT, "timeout")
+                    ctypes.memmove(obj.data, data, len(data))
+                    return len(data)
+                with lock:
+                    sent[obj.ep] += ctypes.string_at(obj.data, obj.len)
+                return obj.len
+            raise AssertionError(hex(request))
+
+        with tempfile.TemporaryDirectory() as root:
+            self.make_sysfs(root)
+            real_interfaces = c5_socat.gadget_interfaces
+            with mock.patch.object(c5_socat, "usb_ioctl", fake_ioctl), \
+                    mock.patch.object(c5_socat, "gadget_node", return_value=os.devnull), \
+                    mock.patch.object(c5_socat, "gadget_interfaces",
+                                      lambda name: real_interfaces(name, root)), \
+                    mock.patch.object(c5_socat, "USBFS", True), \
+                    mock.patch.dict(c5_socat.USBFS_LINKS, clear=True):
+                link = c5_socat.UsbfsLink(("1-1.3", 1, 7))
+                link.open()
+                try:
+                    self.assertEqual(claimed, {0, 1, 2, 3, 4})
+                    for n in range(5):
+                        path = c5_socat.find_link("1.%d" % n)
+                        self.assertTrue(path.startswith("/dev/pts/"), path)
+                        fd = os.open(path, os.O_RDWR | os.O_NOCTTY)
+                        try:
+                            payload = c5_socat.identify_block() + bytes([n])
+                            inbound[0x81 + n].put(payload)
+                            self.assertTrue(select.select([fd], [], [], 2)[0])
+                            self.assertEqual(os.read(fd, 64), payload)
+                            os.write(fd, payload[::-1])
+                            deadline = time.monotonic() + 2
+                            while time.monotonic() < deadline and \
+                                    bytes(sent[0x01 + n]) != payload[::-1]:
+                                time.sleep(0.01)
+                            self.assertEqual(bytes(sent[0x01 + n]), payload[::-1])
+                        finally:
+                            os.close(fd)
+                finally:
+                    link.close()
+                self.assertEqual(claimed, set())
+                self.assertEqual(c5_socat.USBFS_LINKS, {})
+
+
 class IdentifyMonitorTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

@@ -6,6 +6,7 @@ process spot unanswered Klipper identify packets; the supervisor stops socat
 before changing UART parity or sending the stock boot-stage wake sequence.
 GPL-3.0-or-later.
 """
+import ctypes
 import os
 import errno
 import re
@@ -104,6 +105,8 @@ def bind_usb_serial():
 
 
 def find_link(iface):
+    if USBFS:
+        return USBFS_LINKS.get(iface)
     try:
         names = sorted(n for n in os.listdir("/sys/class/tty")
                        if n.startswith("ttyUSB"))
@@ -138,6 +141,276 @@ def find_link(iface):
         except (OSError, ValueError):
             continue
     return None
+
+
+# ---- usbfs: kernels without usb-serial ------------------------------------
+# FlashForge's kernel 2.0.8 (firmware 2.0.0) has no usb-serial drivers, so
+# nothing can be bound to the gadget. usbfs is part of the USB core: each
+# gadget interface is claimed and its bulk endpoints are moved to and from a
+# pty, whose slave stands in for the ttyUSB (socat and the beep server open
+# it). See README.md.
+USB_DEVICES = "/sys/bus/usb/devices"
+GADGET_VID, GADGET_PID = "1d6b", "0104"
+USBFS = False
+USBFS_LINKS = {}   # gadget interface ("1.0") -> pty slave path
+LIBC = None
+
+
+class _BulkTransfer(ctypes.Structure):
+    _fields_ = [("ep", ctypes.c_uint), ("len", ctypes.c_uint),
+                ("timeout", ctypes.c_uint), ("data", ctypes.c_void_p)]
+
+
+class _UsbIoctl(ctypes.Structure):
+    _fields_ = [("ifno", ctypes.c_int), ("ioctl_code", ctypes.c_int),
+                ("data", ctypes.c_void_p)]
+
+
+def _ioc(direction, nr, size, mips=None):
+    # asm/ioctl.h, type 'U': MIPS has three direction bits (none 1, read 2,
+    # write 4) and 13 size bits; the generic layout two (none 0, write 1,
+    # read 2) and 14.
+    if mips is None:
+        mips = os.uname().machine.startswith("mips")
+    if mips:
+        bits = {"": 1, "r": 2, "w": 4, "rw": 6}[direction]
+        return bits << 29 | size << 16 | ord("U") << 8 | nr
+    bits = {"": 0, "w": 1, "r": 2, "rw": 3}[direction]
+    return bits << 30 | size << 16 | ord("U") << 8 | nr
+
+
+USBDEVFS_BULK = _ioc("rw", 2, ctypes.sizeof(_BulkTransfer))
+USBDEVFS_CLAIMINTERFACE = _ioc("r", 15, 4)
+USBDEVFS_RELEASEINTERFACE = _ioc("r", 16, 4)
+USBDEVFS_IOCTL = _ioc("rw", 18, ctypes.sizeof(_UsbIoctl))
+USBDEVFS_CLEAR_HALT = _ioc("r", 21, 4)
+USBDEVFS_DISCONNECT = _ioc("", 22, 0)
+
+
+def usb_ioctl(fd, request, arg):
+    # Through ctypes, which releases the GIL while a bulk transfer waits.
+    global LIBC
+    if LIBC is None:
+        LIBC = ctypes.CDLL(None, use_errno=True)
+        LIBC.ioctl.restype = ctypes.c_int
+    result = LIBC.ioctl(fd, ctypes.c_ulong(request), arg)
+    if result < 0:
+        code = ctypes.get_errno()
+        raise OSError(code, os.strerror(code))
+    return result
+
+
+def _sysfs(*parts):
+    with open(os.path.join(*parts)) as f:
+        return f.read().strip()
+
+
+def find_gadget(root=USB_DEVICES):
+    """The gadget's USB device: (sysfs name, bus, devnum), or None."""
+    try:
+        names = sorted(n for n in os.listdir(root) if ":" not in n)
+    except OSError:
+        return None
+    for name in names:
+        try:
+            if (_sysfs(root, name, "idVendor") == GADGET_VID
+                    and _sysfs(root, name, "idProduct") == GADGET_PID):
+                return (name, int(_sysfs(root, name, "busnum")),
+                        int(_sysfs(root, name, "devnum")))
+        except (OSError, ValueError):
+            continue
+    return None
+
+
+def gadget_interfaces(name, root=USB_DEVICES):
+    """{"1.N": (ifno, ep_in, ep_out, max_packet)} for each interface with a
+    bulk endpoint each way (the gser ports)."""
+    result = {}
+    for entry in os.listdir(root):
+        if not entry.startswith(name + ":"):
+            continue
+        path = os.path.join(root, entry)
+        ep_in = ep_out = None
+        packet = 0
+        for ep in os.listdir(path):
+            if not ep.startswith("ep_"):
+                continue
+            if _sysfs(path, ep, "type") != "Bulk":
+                continue
+            address = int(_sysfs(path, ep, "bEndpointAddress"), 16)
+            if address & 0x80:
+                ep_in = address
+                packet = int(_sysfs(path, ep, "wMaxPacketSize"), 16) & 0x7ff
+            else:
+                ep_out = address
+        if ep_in is not None and ep_out is not None:
+            result[entry.split(":", 1)[1]] = (
+                int(_sysfs(path, "bInterfaceNumber"), 16), ep_in, ep_out, packet)
+    return result
+
+
+def gadget_node(name, bus, dev, root=USB_DEVICES):
+    node = "/dev/bus/usb/%03d/%03d" % (bus, dev)
+    if os.path.exists(node):
+        return node
+    major, minor = (int(n) for n in _sysfs(root, name, "dev").split(":"))
+    node = "/tmp/c5-usbfs-%03d-%03d" % (bus, dev)
+    if os.path.exists(node):
+        os.unlink(node)
+    os.mknod(node, stat.S_IFCHR | 0o600, os.makedev(major, minor))
+    return node
+
+
+def _pty_write(master, data, down):
+    # Nobody reading the pty for a second (socat restarting): drop it, as a
+    # tty with no reader would.
+    view = memoryview(data)
+    deadline = time.monotonic() + 1.0
+    while view and not down.is_set():
+        try:
+            view = view[os.write(master, view):]
+        except BlockingIOError:
+            if time.monotonic() > deadline:
+                return
+            select.select([], [master], [], 0.1)
+
+
+def usbfs_in(fd, ep, packet, master, down, iface):
+    # One packet per transfer: any packet completes it, so a timeout never
+    # cancels a transfer that has data in it.
+    buf = ctypes.create_string_buffer(packet)
+    xfer = _BulkTransfer(ep, packet, 1000, ctypes.addressof(buf))
+    while not down.is_set():
+        try:
+            n = usb_ioctl(fd, USBDEVFS_BULK, ctypes.byref(xfer))
+        except OSError as e:
+            if e.errno == errno.ETIMEDOUT:
+                continue
+            if e.errno == errno.EPIPE:
+                try:
+                    usb_ioctl(fd, USBDEVFS_CLEAR_HALT, ctypes.byref(ctypes.c_uint(ep)))
+                    continue
+                except OSError:
+                    pass
+            log("usb", "%s in: %s" % (iface, e))
+            down.set()
+            return
+        if n:
+            _pty_write(master, buf.raw[:n], down)
+
+
+def usbfs_out(fd, ep, master, down, iface):
+    buf = ctypes.create_string_buffer(4096)
+    while not down.is_set():
+        if not select.select([master], [], [], 0.5)[0]:
+            continue
+        try:
+            data = os.read(master, len(buf))
+        except BlockingIOError:
+            continue
+        except OSError as e:
+            log("usb", "%s pty: %s" % (iface, e))
+            down.set()
+            return
+        ctypes.memmove(buf, data, len(data))
+        xfer = _BulkTransfer(ep, len(data), 1000, ctypes.addressof(buf))
+        try:
+            usb_ioctl(fd, USBDEVFS_BULK, ctypes.byref(xfer))
+        except OSError as e:
+            if e.errno == errno.ETIMEDOUT:
+                continue   # the SBC isn't reading this port
+            log("usb", "%s out: %s" % (iface, e))
+            down.set()
+            return
+
+
+class UsbfsLink:
+    def __init__(self, gadget):
+        self.gadget = gadget
+        self.down = threading.Event()
+        self.fd = None
+        self.claimed = []
+        self.ptys = []
+        self.threads = []
+        self.ifaces = []
+
+    def open(self):
+        name, bus, dev = self.gadget
+        self.fd = os.open(gadget_node(name, bus, dev), os.O_RDWR)
+        interfaces = gadget_interfaces(name)
+        if not interfaces:
+            raise OSError(errno.ENODEV, "gadget has no bulk interfaces")
+        for iface, (ifno, ep_in, ep_out, packet) in sorted(interfaces.items()):
+            # A usb-serial driver (kernel 2.0.7, forced usbfs) lets go first
+            request = _UsbIoctl(ifno, USBDEVFS_DISCONNECT, None)
+            try:
+                usb_ioctl(self.fd, USBDEVFS_IOCTL, ctypes.byref(request))
+            except OSError as e:
+                if e.errno != errno.ENODATA:
+                    raise
+            usb_ioctl(self.fd, USBDEVFS_CLAIMINTERFACE,
+                      ctypes.byref(ctypes.c_uint(ifno)))
+            self.claimed.append(ifno)
+            master, slave = os.openpty()
+            self.ptys += [master, slave]
+            # Raw before any data: an echoing pty would send it straight back
+            configure_tty(slave, 115200)
+            os.set_blocking(master, False)
+            for target, args in ((usbfs_in, (self.fd, ep_in, packet, master)),
+                                 (usbfs_out, (self.fd, ep_out, master))):
+                thread = threading.Thread(target=target,
+                                          args=args + (self.down, iface),
+                                          name="usb-%s" % iface, daemon=True)
+                thread.start()
+                self.threads.append(thread)
+            USBFS_LINKS[iface] = os.ttyname(slave)
+            self.ifaces.append(iface)
+
+    def close(self):
+        self.down.set()
+        for iface in self.ifaces:
+            USBFS_LINKS.pop(iface, None)
+        for thread in self.threads:
+            thread.join(2.0)
+        for fd in self.ptys:
+            os.close(fd)
+        for ifno in self.claimed:
+            try:
+                usb_ioctl(self.fd, USBDEVFS_RELEASEINTERFACE,
+                          ctypes.byref(ctypes.c_uint(ifno)))
+            except OSError:
+                pass
+        if self.fd is not None:
+            os.close(self.fd)
+
+
+def run_usbfs():
+    link = None
+    try:
+        while not STOP.is_set():
+            gadget = find_gadget()
+            if link is not None and (link.down.is_set() or gadget != link.gadget):
+                link.close()
+                link = None
+                log("usb", "usbfs link down")
+            if link is None and gadget is not None:
+                link = UsbfsLink(gadget)
+                try:
+                    link.open()
+                    log("usb", "usbfs link up: %s" % ", ".join(
+                        "%s=%s" % (i, USBFS_LINKS[i]) for i in link.ifaces))
+                except (OSError, ValueError) as e:
+                    log("usb", "usbfs open failed: %s" % e)
+                    link.close()
+                    link = None
+                    STOP.wait(2.0)
+                    continue
+            STOP.wait(0.5)
+    except Exception:
+        log("usb", "usbfs thread crashed:\n" + traceback.format_exc())
+    finally:
+        if link is not None:
+            link.close()
 
 
 def configure_tty(fd, baud, parity=None):
@@ -599,7 +872,7 @@ def set_priority():
 
 
 def main():
-    global LOG_FILE
+    global LOG_FILE, USBFS
     os.makedirs(os.path.dirname(LOG_PATH), exist_ok=True)
     LOG_FILE = open(LOG_PATH, "a", buffering=1)
     log("supervisor", "starting")
@@ -609,11 +882,16 @@ def main():
     if not os.access(SOCAT, os.X_OK):
         log("supervisor", "%s missing or not executable" % SOCAT)
         return 1
-    driver = bind_usb_serial()
+    # C5_TUNNEL_USBFS=1 forces usbfs (testing it on a kernel that has the
+    # drivers)
+    driver = None if os.environ.get("C5_TUNNEL_USBFS") == "1" else bind_usb_serial()
+    usbfs_thread = None
     if driver is None:
-        log("supervisor", "no usable usb-serial driver; refusing socat mode")
-        return 1
-    log("supervisor", "gadget bound to %s" % driver)
+        log("supervisor", "no usb-serial driver; reaching the gadget through usbfs")
+        USBFS = True
+        usbfs_thread = threading.Thread(target=run_usbfs, name="usbfs", daemon=True)
+    else:
+        log("supervisor", "gadget bound to %s" % driver)
     set_priority()
     def on_signal(signum, frame):
         STOP.set()
@@ -625,6 +903,8 @@ def main():
                                    daemon=True)
     beep_net_thread = threading.Thread(target=run_beep_network_server,
                                        name="beep-net", daemon=True)
+    if usbfs_thread is not None:
+        usbfs_thread.start()
     for thread in threads:
         thread.start()
     beep_thread.start()
@@ -635,6 +915,8 @@ def main():
         thread.join(4.0)
     beep_thread.join(4.0)
     beep_net_thread.join(4.0)
+    if usbfs_thread is not None:
+        usbfs_thread.join(4.0)
     log("supervisor", "stopped")
     return 0
 

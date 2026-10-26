@@ -14,9 +14,33 @@ disconnect. Nothing periodically sends wake bytes during a print.
 
 This design reduces Python's data-path work, but socat must copy each stream
 to the observer FIFO, so **lower CPU use is not yet measured or guaranteed**.
-The current printer has `/opt/bin/socat` and a working usb-serial driver.
-This variant requires `/dev/ttyUSB*` on the printer. It will not run on a
-kernel that only supports the original bridge's usbfs transport.
+## Reaching the gadget: usb-serial or usbfs
+
+On FlashForge kernel 2.0.7 (firmware 1.9.9) and older, the supervisor gives
+the gadget's id (`1d6b:0104`) to a built-in `usb-serial-simple` driver
+(`flashloader` and so on), and each gadget port appears as a `/dev/ttyUSB*`.
+
+Kernel 2.0.8 (firmware 2.0.0) has no usb-serial drivers at all: the
+usb-serial core, `usb-serial-simple`, `ch341` and `cdc_acm` were all left out
+of FlashForge's build. When no driver can be bound, the supervisor reaches the
+gadget through usbfs instead (part of the USB core, so present on every
+kernel):
+
+- it finds the gadget in `/sys/bus/usb/devices` and opens its
+  `/dev/bus/usb/BBB/DDD` node;
+- for each interface with a bulk endpoint each way (all five gser ports,
+  `1.0`–`1.4`), it detaches any kernel driver, claims the interface, and
+  creates a pty;
+- two threads per port move the data: bulk IN → pty, and pty → bulk OUT,
+  with `USBDEVFS_BULK` through ctypes (the GIL is released while a transfer
+  waits). An IN transfer is exactly one packet long, so it completes as soon
+  as any packet arrives and a timeout never cancels one with data in it;
+- the pty slave stands in for the `ttyUSB`: socat, the wake handshake and
+  the beep server use it unchanged.
+
+A USB disconnect (the SBC rebooting) closes the ptys; the link comes back,
+with new ptys, when the gadget reappears. `C5_TUNNEL_USBFS=1` forces usbfs on
+a kernel that does have the drivers, for testing.
 
 ## Safe installation
 
