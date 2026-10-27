@@ -35,6 +35,79 @@ class GadgetBindingTest(unittest.TestCase):
             c5_socat.LOG_FILE = original_log_file
 
 
+class LoadUsbSerialTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.drivers = os.path.join(self.tmp.name, "drivers")
+        self.modules = os.path.join(self.tmp.name, "modules")
+        os.makedirs(self.drivers)
+        os.makedirs(self.modules)
+        self.log = io.StringIO()
+        self.original_log_file = c5_socat.LOG_FILE
+        c5_socat.LOG_FILE = self.log
+
+    def tearDown(self):
+        c5_socat.LOG_FILE = self.original_log_file
+        self.tmp.cleanup()
+
+    def add_modules(self):
+        for name in c5_socat.USB_SERIAL_MODULES:
+            open(os.path.join(self.modules, name), "w").close()
+
+    def insmod(self, *results):
+        """Fake insmod: each call returns the next (code, stderr); a code of
+        0 for usb-serial-simple registers the flashloader driver."""
+        calls = []
+        def run(cmd, **kwargs):
+            code, err = results[len(calls)]
+            calls.append(os.path.basename(cmd[1]))
+            if code == 0 and cmd[1].endswith("usb-serial-simple.ko"):
+                os.makedirs(os.path.join(self.drivers, "flashloader"))
+            return subprocess.CompletedProcess(cmd, code, b"", err.encode())
+        return calls, mock.patch.object(c5_socat.subprocess, "run", side_effect=run)
+
+    def load(self):
+        return c5_socat.load_usb_serial(self.drivers, self.modules)
+
+    def test_built_in_driver_needs_no_modules(self):
+        os.makedirs(os.path.join(self.drivers, "flashloader"))
+        calls, patch = self.insmod()
+        with patch:
+            self.assertIsNone(self.load())
+        self.assertEqual(calls, [])
+
+    def test_loads_core_before_simple(self):
+        self.add_modules()
+        calls, patch = self.insmod((0, ""), (0, ""))
+        with patch:
+            self.assertIsNone(self.load())
+        self.assertEqual(calls, ["usbserial.ko", "usb-serial-simple.ko"])
+
+    def test_module_left_loaded_by_earlier_run_is_fine(self):
+        self.add_modules()
+        calls, patch = self.insmod(
+            (1, "insmod: can't insert 'usbserial.ko': File exists"), (0, ""))
+        with patch:
+            self.assertIsNone(self.load())
+        self.assertIn("already loaded", self.log.getvalue())
+
+    def test_missing_modules_give_a_reason(self):
+        calls, patch = self.insmod()
+        with patch:
+            reason = self.load()
+        self.assertIn("usbserial.ko", reason)
+        self.assertEqual(calls, [])
+
+    def test_insmod_failure_stops_and_gives_a_reason(self):
+        self.add_modules()
+        calls, patch = self.insmod(
+            (1, "insmod: can't insert 'usbserial.ko': invalid module format"))
+        with patch:
+            reason = self.load()
+        self.assertIn("invalid module format", reason)
+        self.assertEqual(calls, ["usbserial.ko"])
+
+
 class UsbfsTest(unittest.TestCase):
     def test_ioctl_numbers(self):
         # Values from linux/usbdevice_fs.h as built on each architecture

@@ -22,7 +22,13 @@ the gadget's id (`1d6b:0104`) to a built-in `usb-serial-simple` driver
 
 Kernel 2.0.8 (firmware 2.0.0) has no usb-serial drivers at all: the
 usb-serial core, `usb-serial-simple`, `ch341` and `cdc_acm` were all left out
-of FlashForge's build. When no driver can be bound, the supervisor reaches the
+of FlashForge's build. There the supervisor first loads the bundled
+`modules/usbserial.ko` and `modules/usb-serial-simple.ko` (see
+[modules/README.md](modules/README.md)) and then binds as above.
+
+If usb-serial still isn't usable (modules missing or rejected, or no driver
+takes the gadget id), the supervisor logs
+`falling back to usbfs instead of usb-serial: <reason>` and reaches the
 gadget through usbfs instead (part of the USB core, so present on every
 kernel):
 

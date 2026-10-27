@@ -74,6 +74,43 @@ def log(port, message):
             pass
 
 
+# Kernel 2.0.8 (firmware 2.0.0) has no usb-serial at all. These modules,
+# built for it from Ingenic's X2600 kernel source (see modules/README.md),
+# put usb-serial back; kernels that have it built in never load them.
+MODULES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "modules")
+USB_SERIAL_MODULES = ("usbserial.ko", "usb-serial-simple.ko")   # load order
+USB_SERIAL_DRIVERS_DIR = "/sys/bus/usb-serial/drivers"
+
+
+def load_usb_serial(drivers_dir=USB_SERIAL_DRIVERS_DIR, modules_dir=MODULES_DIR):
+    """Make sure a DRIVERS entry exists, inserting the bundled modules if the
+    kernel lacks them. Returns None when usb-serial is usable, otherwise why
+    it isn't."""
+    if any(os.path.isdir(os.path.join(drivers_dir, d)) for d in DRIVERS):
+        return None
+    paths = [os.path.join(modules_dir, m) for m in USB_SERIAL_MODULES]
+    missing = [p for p in paths if not os.path.isfile(p)]
+    if missing:
+        return "the kernel has no usb-serial and %s is missing" % ", ".join(missing)
+    for path in paths:
+        try:
+            result = subprocess.run(["insmod", path], stdout=subprocess.PIPE,
+                                    stderr=subprocess.PIPE, timeout=10)
+        except (OSError, subprocess.SubprocessError) as e:
+            return "insmod %s failed: %s" % (path, e)
+        error = result.stderr.decode("utf-8", "replace").strip()
+        if result.returncode == 0:
+            log("usb", "loaded %s" % path)
+        elif "File exists" in error:        # left loaded by an earlier run
+            log("usb", "%s already loaded" % path)
+        else:
+            return "insmod %s failed (%d): %s" % (path, result.returncode,
+                                                   error or "no output")
+    if not any(os.path.isdir(os.path.join(drivers_dir, d)) for d in DRIVERS):
+        return "usb-serial modules loaded but no driver appeared in %s" % drivers_dir
+    return None
+
+
 def bind_usb_serial():
     gadget_id = "1d6b 0104"
     # new_id is a registration endpoint, not a reliable list of IDs already
@@ -884,14 +921,20 @@ def main():
         return 1
     # C5_TUNNEL_USBFS=1 forces usbfs (testing it on a kernel that has the
     # drivers)
-    driver = None if os.environ.get("C5_TUNNEL_USBFS") == "1" else bind_usb_serial()
+    if os.environ.get("C5_TUNNEL_USBFS") == "1":
+        driver, reason = None, "C5_TUNNEL_USBFS=1 forces it"
+    else:
+        reason = load_usb_serial()
+        driver = None if reason else bind_usb_serial()
+        if reason is None and driver is None:
+            reason = "no usb-serial driver took the gadget id (see the usb lines above)"
     usbfs_thread = None
     if driver is None:
-        log("supervisor", "no usb-serial driver; reaching the gadget through usbfs")
+        log("supervisor", "falling back to usbfs instead of usb-serial: %s" % reason)
         USBFS = True
         usbfs_thread = threading.Thread(target=run_usbfs, name="usbfs", daemon=True)
     else:
-        log("supervisor", "gadget bound to %s" % driver)
+        log("supervisor", "gadget bound to usb-serial driver %s" % driver)
     set_priority()
     def on_signal(signum, frame):
         STOP.set()
