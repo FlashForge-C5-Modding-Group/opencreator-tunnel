@@ -263,6 +263,12 @@ managed_services: klipper
 #[spoolman]
 #server: http://192.168.1.100:7912
 #sync_rate: 5
+
+[job_queue]
+load_on_startup: False
+automatic_transition: False
+job_transition_delay: 0
+job_transition_gcode:
 EOF
 fi
 "$MOONRAKER_DIR/scripts/install-moonraker.sh" -f -d "$DATA"

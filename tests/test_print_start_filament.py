@@ -153,6 +153,38 @@ class PrintStartMaterialTests(unittest.TestCase):
         self.assertEqual(commands.count("C5_TOOL_PURGE"), 1)
 
 
+def render_entry(params, maps):
+    printer = {"AFC": {"lanes": ["extruder%d" % i for i in range(4)]}}
+    for head, tool in enumerate(maps):
+        # AFC reports map as a list
+        printer["AFC_lane extruder%d" % head] = {
+            "map": ["T%d" % tool], "extruder": "extruder%d" % head}
+    return macro_template(CONFIG, "C5_PRINT_START").render(
+        printer=printer, params=params, rawparams="")
+
+
+class PrintStartMappingTests(unittest.TestCase):
+    def test_unmapped_parameters_pass_through(self):
+        output = render_entry({"TOOL": "1", "TOOLS": "1,2", "HOTEND1": "230"},
+                              [0, 1, 2, 3])
+        self.assertIn('TOOL="1" TOOLS="1,2" HOTEND1="230"', output)
+
+    def test_colour_moved_to_another_head_heats_that_head(self):
+        # T1's colour picked on head 2, and T2's on head 1
+        output = render_entry({"TOOL": "1", "TOOLS": "0,1", "HOTEND1": "230",
+                               "IDLE1": "150", "MATERIAL1": "PLA Silk",
+                               "USED_TOOLS": "1,3", "HOTEND": "220"},
+                              [0, 2, 1, 3])
+        self.assertIn('TOOL="2" TOOLS="0,2" HOTEND2="230" IDLE2="150" '
+                      'MATERIAL2="PLA Silk" USED_TOOLS="2,3" HOTEND="220"',
+                      output)
+
+    def test_without_afc_nothing_moves(self):
+        output = macro_template(CONFIG, "C5_PRINT_START").render(
+            printer={}, params={"TOOL": "3", "HOTEND3": "240"}, rawparams="")
+        self.assertIn('TOOL="3" HOTEND3="240"', output)
+
+
 def render_runout(name, tool, sensors, temp=220):
     printer = {
         "gcode_macro C5_FILAMENT_RUNOUT": {
