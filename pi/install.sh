@@ -267,7 +267,7 @@ managed_services: klipper
 [job_queue]
 load_on_startup: False
 automatic_transition: False
-job_transition_delay: 0
+job_transition_delay: 1
 job_transition_gcode:
 EOF
 fi
