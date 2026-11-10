@@ -44,16 +44,25 @@ class VfaMacroTest(unittest.TestCase):
 
     def test_compensation_passes_the_axis_and_graphs_only_it(self):
         lines = run("VFA_COMPENSATION", AXIS="y", GRAPH="1")
-        self.assertIn("STEPPER_RESONANCE_FACTORY_CALIBRATE AXIS=Y", lines)
-        self.assertEqual(steppers(lines, "STEPPER_RESONANCE_CURVE_TEST"), ["stepper_y"])
+        self.assertIn("STEPPER_RESONANCE_FACTORY_CALIBRATE AXIS=Y GRAPH=1", lines)
+        # the "after" sweep is part of the calibration now, not a separate one
+        self.assertEqual(steppers(lines, "STEPPER_RESONANCE_CURVE_TEST"), [])
         self.assertIn('RUN_SHELL_COMMAND CMD=oc_vfa_graph PARAMS="stepper_y"', lines)
         self.assertNotIn('RUN_SHELL_COMMAND CMD=oc_vfa_graph PARAMS="stepper_x"', lines)
         self.assertEqual(lines[-1], "SAVE_CONFIG")
 
     def test_both_axes_graph_both(self):
         lines = run("VFA_COMPENSATION", GRAPH="1")
-        self.assertIn("STEPPER_RESONANCE_FACTORY_CALIBRATE AXIS=XY", lines)
-        self.assertEqual(steppers(lines, "STEPPER_RESONANCE_CURVE_TEST"), ["stepper_x", "stepper_y"])
+        self.assertIn("STEPPER_RESONANCE_FACTORY_CALIBRATE AXIS=XY GRAPH=1", lines)
+        self.assertIn('RUN_SHELL_COMMAND CMD=oc_vfa_graph PARAMS="stepper_x"', lines)
+        self.assertIn('RUN_SHELL_COMMAND CMD=oc_vfa_graph PARAMS="stepper_y"', lines)
+
+    def test_graph_is_passed_to_each_motors_calibration(self):
+        lines = run("STEPPER_RESONANCE_FACTORY_CALIBRATE", AXIS="XY", GRAPH="1")
+        self.assertIn("STEPPER_RESONANCE_AUTO_CALIBRATE STEPPER=stepper_x GRAPH=1", lines)
+        self.assertIn("STEPPER_RESONANCE_AUTO_CALIBRATE STEPPER=stepper_y GRAPH=1", lines)
+        lines = run("STEPPER_RESONANCE_FACTORY_CALIBRATE")
+        self.assertIn("STEPPER_RESONANCE_AUTO_CALIBRATE STEPPER=stepper_x GRAPH=0", lines)
 
     def test_bad_axis_and_printing_are_refused(self):
         with self.assertRaises(Raised):
