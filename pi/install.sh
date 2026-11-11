@@ -276,6 +276,10 @@ ln -sf "$PI/moonraker/opencreator_3mf.py" \
     "$MOONRAKER_DIR/moonraker/components/opencreator_3mf.py"
 grep -q '^\[opencreator_3mf\]' "$CONFIG/moonraker.conf" ||
     printf '\n[opencreator_3mf]\n' >> "$CONFIG/moonraker.conf"
+ln -sf "$PI/moonraker/opencreator_cancel.py" \
+    "$MOONRAKER_DIR/moonraker/components/opencreator_cancel.py"
+grep -q '^\[opencreator_cancel\]' "$CONFIG/moonraker.conf" ||
+    printf '\n[opencreator_cancel]\n' >> "$CONFIG/moonraker.conf"
 
 step "Timelapse"
 TIMELAPSE_REPO=${TIMELAPSE_REPO:-https://github.com/mainsail-crew/moonraker-timelapse.git}

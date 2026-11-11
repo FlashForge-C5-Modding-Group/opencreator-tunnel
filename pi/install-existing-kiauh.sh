@@ -219,6 +219,12 @@ else
     ln -s "$source" "$component"
     say "linked sliced-3MF Moonraker component"
 fi
+cancel_component=$MOONRAKER/moonraker/components/opencreator_cancel.py
+cancel_source=$PI/moonraker/opencreator_cancel.py
+if [ -f "$cancel_source" ] && [ ! -e "$cancel_component" ] && [ ! -L "$cancel_component" ]; then
+    ln -s "$cancel_source" "$cancel_component"
+    say "linked print-start cancel Moonraker component"
+fi
 
 if [ ! -f "$CONFIG/moonraker.conf.pre-opencreator" ]; then
     cp -p "$CONFIG/moonraker.conf" "$CONFIG/moonraker.conf.pre-opencreator"
@@ -227,6 +233,10 @@ fi
 if ! grep -q '^\[opencreator_3mf\]$' "$CONFIG/moonraker.conf"; then
     printf '\n[opencreator_3mf]\n' >> "$CONFIG/moonraker.conf"
     say "enabled sliced-3MF uploads"
+fi
+if ! grep -q '^\[opencreator_cancel\]$' "$CONFIG/moonraker.conf"; then
+    printf '\n[opencreator_cancel]\n' >> "$CONFIG/moonraker.conf"
+    say "enabled cancelling during print start"
 fi
 
 # The Creator 5 printer.cfg includes timelapse*.cfg. Reuse any KIAUH-provided
