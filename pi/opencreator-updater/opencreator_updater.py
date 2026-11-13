@@ -580,7 +580,7 @@ class SocUpdater(Updater):
             os.chmod(str(path), mode)
 
     def apply(self, restart=True, loopscript=True) -> bool:
-        """False when something failed, so the MCUs are left alone this time."""
+        """False when something failed (no checkout, a config conflict)."""
         if not self.ensure_clone():
             return False
         try:
@@ -783,19 +783,18 @@ class SocUpdater(Updater):
             except Exception:
                 time.sleep(5)
         while True:
+            # Kalico and the MCU firmware go ahead even when a config didn't merge:
+            # Klipper breaks when they fall out of step, not over a config conflict.
             try:
-                ok = self.apply()
+                self.apply()
             except Exception as e:              # keep watching whatever happens
                 self.log("update failed: %s" % e)
-                ok = False
             try:
-                if ok:
-                    self.sync_kalico()
+                self.sync_kalico()
             except Exception as e:
                 self.log("Kalico update failed: %s" % e)
             try:
-                if ok:
-                    self.sync_mcu()
+                self.sync_mcu()
             except Exception as e:
                 self.log("MCU firmware update failed: %s" % e)
             time.sleep(60)
@@ -866,10 +865,10 @@ def main(argv=None):
     u = SocUpdater(config_dir=Path(a.config_dir) if a.config_dir else SOC_CONFIG,
                    clone=Path(a.repo) if a.repo else SOC_CLONE, **kw)
     if a.once or a.config_dir:
-        ok = u.apply(restart=not a.no_restart, loopscript=not a.no_loopscript and not a.config_dir)
-        if ok and not a.config_dir and not a.no_kalico:
+        u.apply(restart=not a.no_restart, loopscript=not a.no_loopscript and not a.config_dir)
+        if not a.config_dir and not a.no_kalico:
             u.sync_kalico()
-        if ok and not a.config_dir and not a.no_mcu:
+        if not a.config_dir and not a.no_mcu:
             u.sync_mcu()
         return 0
     u.watch()
