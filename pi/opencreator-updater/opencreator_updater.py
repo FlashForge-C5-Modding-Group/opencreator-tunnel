@@ -38,6 +38,7 @@ FS_GIT_URL = "https://github.com/FlashForge-C5-Modding-Group/opencreator-fs.git"
 LOOPSCRIPT_PARTS = ("startup", "firmware", "tunneled", "moonraker", "fluidd", "plugin-manager",
                     "mcu-flash")
 NGINX_CONF_D = Path("/usr/data/nginx/conf.d")
+GRUMPYSCREEN_DIR = Path("/usr/data/grumpyscreen")
 FIRMWARE_EXE = Path("/usr/prog/PROGRAM/software/firmwareExe")
 STOCK_STARTUP = (Path("/usr/prog/app_startup.sh"), Path("/usr/prog/PROGRAM/runFirmwareExe.sh"))
 SOC_LOG = Path("/tmp/opencreator-updater.log")
@@ -440,8 +441,10 @@ class SocUpdater(Updater):
         self.ocdir = Path(ocdir)
         self.loopscript_applied = self.ocdir / ".loopscript-commit"
         self.nginx = NGINX_CONF_D
+        self.grumpyscreen = GRUMPYSCREEN_DIR
         self.firmware_exe = FIRMWARE_EXE
         self.control = STOCK_CONTROL
+        self.klipper = SOC_KLIPPER
 
     def ensure_clone(self) -> bool:
         if (self.repo / ".git").is_dir():
@@ -502,10 +505,22 @@ class SocUpdater(Updater):
             shutil.rmtree(old, ignore_errors=True)
             self.log("loopscript %s: updated" % part)
             changed = True
+            if part == "startup":
+                self.repair_moonraker_repo()
         version = src_root / "opencreator" / "version.txt"
         if version.is_file() and (not (self.ocdir / "version.txt").is_file()
                                   or (self.ocdir / "version.txt").read_bytes() != version.read_bytes()):
             shutil.copy2(str(version), str(self.ocdir / "version.txt"))
+        # GrumpyScreen reads its translations from beside its binary; only where
+        # it is installed. It picks them up the next time it starts.
+        if (self.grumpyscreen / "grumpyscreen").is_file():
+            for lang in sorted((src_root / "grumpyscreen" / "languages").glob("*.json")):
+                dest = self.grumpyscreen / "languages" / lang.name
+                if dest.is_file() and dest.read_bytes() == lang.read_bytes():
+                    continue
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                write_atomic(dest, lang.read_bytes(), 0o644)
+                self.log("grumpyscreen language %s: updated" % lang.name)
         for conf in sorted((src_root / "nginx" / "conf.d").glob("*.conf")):
             dest = self.nginx / conf.name
             if dest.is_file() and dest.read_bytes() == conf.read_bytes():
@@ -533,6 +548,20 @@ class SocUpdater(Updater):
             except Exception:
                 pass
         return changed
+
+    def repair_moonraker_repo(self):
+        """A Moonraker checkout its update manager calls invalid, put right now
+        instead of at the next boot (startup/moonraker-repo.sh)."""
+        script = self.ocdir / "startup" / "moonraker-repo.sh"
+        if not script.is_file():
+            return
+        try:
+            r = subprocess.run(["sh", str(script), "live"], stdout=subprocess.PIPE,
+                               stderr=subprocess.STDOUT, timeout=60)
+            for line in r.stdout.decode(errors="replace").splitlines():
+                self.log(line)
+        except (OSError, subprocess.TimeoutExpired) as e:
+            self.log("moonraker repo: repair failed: %s" % e)
 
     def config_state(self):
         """What a conflicted merge depends on: the live configs and their bases."""
@@ -586,6 +615,44 @@ class SocUpdater(Updater):
             self._restarted_for = head
             self.restart_klipper(conflicts)
         return not conflicts
+
+    # ---- Kalico -----------------------------------------------------------------
+    def sync_kalico(self):
+        """Once per opencreator-fs commit, bring the Kalico checkout to the newest
+        commit of its branch, so new configs don't need Kalico they don't have yet.
+        Left alone while printing (tried again later), with local changes, or off a
+        branch. Klipper isn't restarted; an MCU flash or the user does that."""
+        try:
+            head = self.head()
+        except UpdateError:
+            return
+        record = self.state / "kalico-synced"
+        if self._read(record) == head or not (self.klipper / ".git").exists():
+            return
+        if self.printing():
+            return
+        try:
+            branch = self.git("rev-parse", "--abbrev-ref", "HEAD", cwd=self.klipper).decode().strip()
+            dirty = self.git("status", "--porcelain", "--untracked-files=no", cwd=self.klipper).strip()
+        except UpdateError as e:
+            self.log("Kalico: can't read the checkout (%s)" % e)
+            return
+        if branch == "HEAD" or dirty:
+            self.log("Kalico: %s, left as it is" % ("not on a branch" if branch == "HEAD" else "has local changes"))
+            write_atomic(record, (head + "\n").encode())
+            return
+        try:
+            before = self.git("rev-parse", "HEAD", cwd=self.klipper).decode().strip()
+            self.git("fetch", "--quiet", "--depth", "1", "origin", branch, cwd=self.klipper)
+            after = self.git("rev-parse", "FETCH_HEAD", cwd=self.klipper).decode().strip()
+            if after != before:
+                self.git("reset", "--quiet", "--hard", "FETCH_HEAD", cwd=self.klipper)
+        except UpdateError as e:
+            self.log("Kalico: not updated (%s); trying again later" % e)
+            return
+        write_atomic(record, (head + "\n").encode())
+        self.log("Kalico (%s): %s" % (branch, "updated %s -> %s" % (before[:9], after[:9])
+                                      if after != before else "already up to date"))
 
     # ---- MCU firmware -----------------------------------------------------------
     def mcu_firmware(self):
@@ -723,6 +790,11 @@ class SocUpdater(Updater):
                 ok = False
             try:
                 if ok:
+                    self.sync_kalico()
+            except Exception as e:
+                self.log("Kalico update failed: %s" % e)
+            try:
+                if ok:
                     self.sync_mcu()
             except Exception as e:
                 self.log("MCU firmware update failed: %s" % e)
@@ -786,6 +858,7 @@ def main(argv=None):
     ap.add_argument("--no-loopscript", action="store_true", help="soc: leave OpenCreator's own folders alone")
     ap.add_argument("--stdout", action="store_true", help="soc: log to the terminal")
     ap.add_argument("--no-mcu", action="store_true", help="soc --once: don't flash MCU firmware")
+    ap.add_argument("--no-kalico", action="store_true", help="soc --once: don't update Kalico")
     a = ap.parse_args(argv)
     if a.where == "pi":
         return PiUpdater(config_dir=a.config_dir, repo=a.repo).run(restart=not a.no_restart)
@@ -794,6 +867,8 @@ def main(argv=None):
                    clone=Path(a.repo) if a.repo else SOC_CLONE, **kw)
     if a.once or a.config_dir:
         ok = u.apply(restart=not a.no_restart, loopscript=not a.no_loopscript and not a.config_dir)
+        if ok and not a.config_dir and not a.no_kalico:
+            u.sync_kalico()
         if ok and not a.config_dir and not a.no_mcu:
             u.sync_mcu()
         return 0
