@@ -37,6 +37,22 @@ calibrations and touchscreen streaming are later phases.
   only fits 3 high-speed serial ports, and the rest fail with `No suitable fifo
   found` once the printer connects. Reboot afterwards; the overlays survive
   kernel updates.
+- Boards with more than one USB device controller: `c5-tunnel-gadget.sh` tries each entry in
+  `/sys/class/udc` until one binds, since the first isn't always the device port. To pick one, put its name
+  in `/etc/c5-tunnel-udc` (or set `C5_TUNNEL_UDC`). `journalctl -u c5-tunnel-gadget` shows which one bound.
+- Orange Pi Zero 3W: the UDC that works is `6a00000.xhci2-controller` (dwc3); the first one listed,
+  `4100000.udc-controller`, fails with `-19`, so it's skipped automatically. The report this comes from also
+  switched that controller to device mode in the device tree, which may or may not be needed (not yet
+  confirmed with a reboot test):
+
+  ```sh
+  DTB=/boot/dtb/allwinner/sun60i-a733-orangepi-zero3w.dtb
+  NODE=/soc@3000000/usbc2@12/xhci2-controller@6a00000
+  sudo cp -a "$DTB" "$DTB.pre-gadget"
+  sudo fdtput -t s "$DTB" "$NODE" role-switch-default-mode device
+  ```
+
+  Reboot afterwards. `ls /dev/ttyGS*` should list `ttyGS0` to `ttyGS4`.
 - A USB cable from the SBC's device port to the USB-A port on the side of
   the printer. A Pi Zero 2 W can be powered from that port. Other SBCs must
   be powered separately and connected with a data-only (power-blocked)

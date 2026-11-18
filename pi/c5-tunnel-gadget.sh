@@ -27,10 +27,24 @@
 # it tries 5 first and falls back to 4 on that failure, without needing a
 # retry or any manual step.
 #
+# Boards with more than one USB device controller (UDC) list them all in
+# /sys/class/udc, and the first isn't always the one wired to the device
+# port: on an Orange Pi Zero 3W the first, 4100000.udc-controller, fails
+# with -19 and 6a00000.xhci2-controller (dwc3) works. So each is tried in
+# turn until one binds. C5_TUNNEL_UDC or /etc/c5-tunnel-udc picks one.
+#
 # Idempotent; "stop" unbinds the gadget from its UDC.
 set -e
 G=/sys/kernel/config/usb_gadget/c5tunnel
 PORTS_FILE=/etc/c5-tunnel-ports
+UDC_FILE=/etc/c5-tunnel-udc
+if [ -n "$C5_TUNNEL_UDC" ]; then
+    UDCS=$C5_TUNNEL_UDC
+elif [ -r "$UDC_FILE" ]; then
+    UDCS=$(cat "$UDC_FILE")
+else
+    UDCS=$(ls /sys/class/udc 2>/dev/null || true)
+fi
 PORTS_PINNED=1
 if [ -n "$C5_TUNNEL_PORTS" ]; then
     PORTS=$C5_TUNNEL_PORTS
@@ -86,15 +100,22 @@ bind_ports() {  # bind_ports PORTS
         [ -e configs/c.1/gser.usb$i ] || ln -s functions/gser.usb$i configs/c.1/
         i=$((i + 1))
     done
-    udc=$(ls /sys/class/udc | head -n 1)
-    if [ -z "$udc" ]; then
+    if [ -z "$UDCS" ]; then
         echo "no UDC in /sys/class/udc (USB peripheral mode not enabled)" >&2
         return 1
     fi
-    echo "$udc" > UDC
+    for udc in $UDCS; do
+        if echo "$udc" > UDC 2>/dev/null; then
+            echo "bound to $udc" >&2
+            return 0
+        fi
+        echo "UDC $udc didn't bind" >&2
+    done
+    return 1
 }
 
 if bind_ports "$PORTS" 2>/tmp/c5-tunnel-gadget.err; then
+    cat /tmp/c5-tunnel-gadget.err >&2
     exit 0
 fi
 cat /tmp/c5-tunnel-gadget.err >&2
