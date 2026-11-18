@@ -326,6 +326,10 @@ place (path, origin, branch, duplicate options; backup
 `FlashForge-C5-Modding-Group/opencreator-tunnel`. Overrides: `OC_REPO_DIR`,
 `OC_DATA` (default `~/printer_data`), `TUNNEL_REPO`, `TUNNEL_BRANCH`.
 
+This only updates the SBC. The printer's own OpenCreator files are updated by
+running `oc-tunneled` over SSH on the printer (see opencreator-fs's
+`config-docs/UPDATER.md`).
+
 ### Updater repair
 
 If Fluidd or Mainsail shows "No git repo detected at configured path",

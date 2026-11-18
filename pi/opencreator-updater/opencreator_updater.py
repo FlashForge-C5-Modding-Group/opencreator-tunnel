@@ -498,6 +498,7 @@ class SocUpdater(Updater):
                 # executable means tunnel mode: keep whichever mode is set
                 tunnel = (dest / "tunneled.sh").is_file() and os.access(str(dest / "tunneled.sh"), os.X_OK)
                 self._chmod(new / "tunneled.sh", 0o755 if tunnel else 0o644)
+                self._chmod(new / "oc-tunneled", 0o755)
             if dest.is_dir():
                 os.rename(str(dest), str(old))
             os.rename(str(new), str(dest))
@@ -615,6 +616,22 @@ class SocUpdater(Updater):
             self._restarted_for = head
             self.restart_klipper(conflicts)
         return not conflicts
+
+    def sync_tunneled(self) -> bool:
+        """A tunneled printer (oc-tunneled): Klipper and its config are on the SBC,
+        so only OpenCreator's own folders; no configs, Kalico or MCU flash."""
+        if not self.ensure_clone():
+            return False
+        try:
+            head = self.head()
+        except UpdateError as e:
+            self.log("can't read the opencreator-fs checkout: %s" % e)
+            return False
+        self.log("syncing LoopScript files from opencreator-fs %s" % head)
+        if not self.sync_loopscript():
+            self.log("LoopScript files: already up to date")
+        write_atomic(self.loopscript_applied, (head + "\n").encode())
+        return True
 
     # ---- Kalico -----------------------------------------------------------------
     def sync_kalico(self):
@@ -858,12 +875,16 @@ def main(argv=None):
     ap.add_argument("--stdout", action="store_true", help="soc: log to the terminal")
     ap.add_argument("--no-mcu", action="store_true", help="soc --once: don't flash MCU firmware")
     ap.add_argument("--no-kalico", action="store_true", help="soc --once: don't update Kalico")
+    ap.add_argument("--tunneled", action="store_true",
+                    help="soc: a tunneled printer, update OpenCreator's own folders only")
     a = ap.parse_args(argv)
     if a.where == "pi":
         return PiUpdater(config_dir=a.config_dir, repo=a.repo).run(restart=not a.no_restart)
     kw = {"log_path": None} if a.stdout else {}
     u = SocUpdater(config_dir=Path(a.config_dir) if a.config_dir else SOC_CONFIG,
                    clone=Path(a.repo) if a.repo else SOC_CLONE, **kw)
+    if a.tunneled:
+        return 0 if u.sync_tunneled() else 1
     if a.once or a.config_dir:
         u.apply(restart=not a.no_restart, loopscript=not a.no_loopscript and not a.config_dir)
         if not a.config_dir and not a.no_kalico:
