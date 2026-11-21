@@ -140,7 +140,8 @@ def md5(path: Path) -> str:
 
 
 class Updater:
-    def __init__(self, config_dir, repo, template_rel, patterns=("*.cfg",), log_path=None,
+    # Every .cfg in the template folder and its subfolders (AFC/, KAMP_LiTE/, ...)
+    def __init__(self, config_dir, repo, template_rel, patterns=("**/*.cfg",), log_path=None,
                  moonraker=MOONRAKER, model_detect=None, out=sys.stdout):
         self.config = Path(config_dir)
         self.state = self.config / ".opencreator-updater"
@@ -829,7 +830,7 @@ class PiUpdater(Updater):
         config = config_dir or os.environ.get("OC_UPDATER_CONFIG_DIR", str(home / "printer_data" / "config"))
         self.klipper = Path(os.environ.get("OC_UPDATER_KLIPPER_DIR", str(home / "klipper")))
         kw.setdefault("moonraker", os.environ.get("OC_UPDATER_MOONRAKER_API", MOONRAKER))
-        super().__init__(config, repo, "pi/config", patterns=("*.cfg", ".fluidd-theme/*"), **kw)
+        super().__init__(config, repo, "pi/config", patterns=("**/*.cfg", ".fluidd-theme/*"), **kw)
 
     def pull_klipper(self) -> bool:
         if not (self.klipper / ".git").is_dir():
