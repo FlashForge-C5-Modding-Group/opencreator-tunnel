@@ -324,6 +324,7 @@ class StopMacroMachine:
         self.active_spool = "print-spool"
         self.relative = False
         self.saved_relative = False
+        self.variables = {}
 
     def on_shuttle(self, tool):
         # _sensor_state invalidates the UI cache even when validation fails.
@@ -420,6 +421,9 @@ class StopMacroMachine:
             self.motors_enabled = False
         elif command == "C5_PRINT_END_TUNE":
             self.end_tune_restored = True
+        elif command == "SET_GCODE_VARIABLE":
+            fields = dict(word.split("=", 1) for word in words[1:])
+            self.variables[(fields["MACRO"], fields["VARIABLE"])] = fields["VALUE"]
         elif command not in ("M400", "STEPPER_RESONANCE_DAMP_DISABLE",
                              "SET_PAUSE_NEXT_LAYER", "SET_PAUSE_AT_LAYER"):
             raise AssertionError("Unmodelled command: %s" % name)
@@ -452,6 +456,11 @@ class PrintStopTests(unittest.TestCase):
         self.assert_cleanup(machine)
         self.assertEqual(machine.afc_unselect_count, 0)
         self.assertEqual(machine.docked, [])
+
+    def test_print_stop_disarms_notower(self):
+        machine = StopMacroMachine(attached=0)
+        machine.execute("C5_PRINT_STOP")
+        self.assertEqual(machine.variables[("_OC_NOTOWER", "armed")], "0")
 
     def test_matched_heads_keep_afc_bookkeeping_even_without_a_loaded_lane(self):
         for tool, selected in enumerate(
